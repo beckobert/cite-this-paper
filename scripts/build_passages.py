@@ -5,7 +5,7 @@ import json
 from collections import OrderedDict
 from pathlib import Path
 
-PASSAGE_BUILDER_VERSION = 1
+PASSAGE_BUILDER_VERSION = 2
 
 
 def word_count(text: str) -> int:
@@ -31,10 +31,15 @@ def group_sentences(sentences: list[dict]):
     groups = OrderedDict()
 
     for sentence in sentences:
+        logical_block_index = sentence.get(
+            "logical_block_index",
+            sentence["block_no"],
+        )
+
         key = (
             sentence["document_id"],
             sentence["page_index"],
-            sentence["block_no"],
+            logical_block_index,
         )
 
         if key not in groups:
@@ -64,12 +69,28 @@ def make_passage(
         sentence["text_normalized"].strip() for sentence in sentences
     )
 
+    logical_block_index = first.get(
+        "logical_block_index",
+        first["block_no"],
+    )
+
+    physical_block_nos = sorted(
+        {
+            block_no
+            for sentence in sentences
+            for block_no in sentence.get(
+                "block_nos",
+                [sentence["block_no"]],
+            )
+        }
+    )
+
     sentence_ids = [sentence["sentence_id"] for sentence in sentences]
 
     passage_id = (
         f"{first['document_id']}:"
         f"p{first['page_number']:04d}:"
-        f"b{first['block_no']:04d}:"
+        f"lb{logical_block_index:04d}:"
         f"c{passage_index:03d}"
     )
 
@@ -82,7 +103,7 @@ def make_passage(
         "document_id": first["document_id"],
         "page_index": first["page_index"],
         "page_number": first["page_number"],
-        "block_no": first["block_no"],
+        "physical_block_nos": physical_block_nos,
         "block_passage_index": passage_index,
         "sentence_ids": sentence_ids,
         "first_page_sentence_index": (first["page_sentence_index"]),
