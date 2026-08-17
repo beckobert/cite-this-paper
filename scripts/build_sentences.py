@@ -8,7 +8,7 @@ from pathlib import Path
 
 import spacy
 
-SENTENCE_BUILDER_VERSION = 2
+SENTENCE_BUILDER_VERSION = 3
 
 
 # Common abbreviations in scientific writing where a simple rule-based
@@ -108,6 +108,142 @@ def group_words_by_block_and_line(words: list[dict]):
         blocks[block_no][line_no].append((page_word_index, word))
 
     return blocks
+
+
+def indexed_words_bbox(
+    indexed_words: list[tuple[int, dict]],
+) -> tuple[float, float, float, float]:
+    """
+    Return the bounding box enclosing a list of indexed word records.
+    """
+    words = [word for _, word in indexed_words]
+
+    return (
+        min(word["bbox"][0] for word in words),
+        min(word["bbox"][1] for word in words),
+        max(word["bbox"][2] for word in words),
+        max(word["bbox"][3] for word in words),
+    )
+
+
+def blocks_share_visual_line(
+    left_lines: OrderedDict,
+    right_lines: OrderedDict,
+    max_horizontal_gap_factor: float = 2.5,
+) -> bool:
+    """
+    Determine whether two consecutive PyMuPDF blocks appear to
+    continue on the same visual line.
+
+    This is intended mainly for inline formatting fragments such as
+    subscripts and superscripts that PyMuPDF occasionally places in
+    separate blocks.
+
+    It deliberately does NOT merge ordinary vertically adjacent
+    paragraphs.
+    """
+    if not left_lines or not right_lines:
+        return False
+
+    left_last_line = next(reversed(left_lines.values()))
+
+    right_first_line = next(iter(right_lines.values()))
+
+    lx0, ly0, lx1, ly1 = indexed_words_bbox(left_last_line)
+
+    rx0, ry0, rx1, ry1 = indexed_words_bbox(right_first_line)
+
+    left_height = max(ly1 - ly0, 1.0)
+    right_height = max(ry1 - ry0, 1.0)
+
+    reference_height = max(
+        left_height,
+        right_height,
+    )
+
+    # ------------------------------------------------------------
+    # Vertical alignment
+    # ------------------------------------------------------------
+
+    vertical_overlap = min(ly1, ry1) - max(ly0, ry0)
+
+    smaller_height = min(
+        left_height,
+        right_height,
+    )
+
+    overlap_ratio = vertical_overlap / smaller_height if vertical_overlap > 0 else 0.0
+
+    left_center_y = (ly0 + ly1) / 2
+    right_center_y = (ry0 + ry1) / 2
+
+    center_difference = abs(left_center_y - right_center_y)
+
+    vertically_aligned = (
+        overlap_ratio >= 0.20 or center_difference <= 0.65 * reference_height
+    )
+
+    if not vertically_aligned:
+        return False
+
+    # ------------------------------------------------------------
+    # Horizontal proximity
+    #
+    # A separate newspaper/journal column will normally be far
+    # outside this threshold, whereas a subscript/superscript is
+    # immediately adjacent to the preceding text.
+    # ------------------------------------------------------------
+
+    horizontal_gap = rx0 - lx1
+
+    maximum_gap = max_horizontal_gap_factor * reference_height
+
+    # Allow slight horizontal overlap because superscripts and
+    # subscripts may overlap the base glyph geometrically.
+    minimum_gap = -1.5 * reference_height
+
+    horizontally_close = minimum_gap <= horizontal_gap <= maximum_gap
+
+    return horizontally_close
+
+
+def build_logical_block_groups(
+    physical_blocks: OrderedDict,
+) -> list[list[int]]:
+    """
+    Merge consecutive physical PyMuPDF blocks when their boundary
+    appears to lie on the same visual line.
+
+    Returns, for example:
+
+        [
+            [0],
+            [1],
+            [2, 3, 4],
+            [5],
+            ...
+        ]
+    """
+    logical_groups = []
+
+    for block_no, lines in physical_blocks.items():
+        if not logical_groups:
+            logical_groups.append([block_no])
+            continue
+
+        previous_block_no = logical_groups[-1][-1]
+
+        previous_lines = physical_blocks[previous_block_no]
+
+        if blocks_share_visual_line(
+            left_lines=previous_lines,
+            right_lines=lines,
+        ):
+            logical_groups[-1].append(block_no)
+        else:
+            logical_groups.append([block_no])
+
+    return logical_groups
 
 
 def needs_space(
@@ -226,25 +362,16 @@ def reconstruct_words(
     return "".join(parts)
 
 
-def reconstruct_block(lines: OrderedDict):
+def reconstruct_logical_block(
+    block_numbers: list[int],
+    physical_blocks: OrderedDict,
+):
     """
-    Reconstruct normalized text for one PyMuPDF text block.
+    Reconstruct text from one or more physical PyMuPDF blocks that
+    have been identified as one logical inline-contiguous block.
 
-    At the same time, retain character spans mapping every reconstructed
-    word back to its original page word index.
-
-    Returns:
-        block_text: str
-
-        word_spans: [
-            {
-                "page_word_index": ...,
-                "start": ...,
-                "end": ...,
-                ...
-            },
-            ...
-        ]
+    Original physical block_no / line_no values are retained in
+    word_spans for provenance.
     """
     parts = []
     word_spans = []
@@ -253,40 +380,57 @@ def reconstruct_block(lines: OrderedDict):
     previous_text = ""
     first_word = True
 
-    for line_number_in_block, (line_no, line_words) in enumerate(lines.items()):
-        for word_number_in_line, (page_word_index, word) in enumerate(line_words):
-            word_text = word["text"]
+    for physical_block_index, block_no in enumerate(block_numbers):
+        lines = physical_blocks[block_no]
 
-            is_new_line = line_number_in_block > 0 and word_number_in_line == 0
+        for line_index, (
+            line_no,
+            line_words,
+        ) in enumerate(lines.items()):
+            for word_index, (
+                page_word_index,
+                word,
+            ) in enumerate(line_words):
+                word_text = word["text"]
 
-            if not first_word and needs_space(
-                previous_text=previous_text,
-                current_text=word_text,
-                is_new_line=is_new_line,
-            ):
-                parts.append(" ")
-                cursor += 1
+                # A physical block boundary inside a logical block
+                # is known to be an inline continuation, so it
+                # should NOT be treated as a physical line break.
+                #
+                # Only subsequent lines within the physical block
+                # count as genuine new lines.
+                is_new_line = line_index > 0 and word_index == 0
 
-            start = cursor
+                if not first_word and needs_space(
+                    previous_text=previous_text,
+                    current_text=word_text,
+                    is_new_line=is_new_line,
+                ):
+                    parts.append(" ")
+                    cursor += 1
 
-            parts.append(word_text)
-            cursor += len(word_text)
+                start = cursor
 
-            end = cursor
+                parts.append(word_text)
+                cursor += len(word_text)
 
-            word_spans.append(
-                {
-                    "page_word_index": page_word_index,
-                    "start": start,
-                    "end": end,
-                    "block_no": word["block_no"],
-                    "line_no": word["line_no"],
-                    "word_no": word["word_no"],
-                }
-            )
+                end = cursor
 
-            previous_text = word_text
-            first_word = False
+                word_spans.append(
+                    {
+                        "page_word_index": page_word_index,
+                        "start": start,
+                        "end": end,
+                        # These remain the ORIGINAL
+                        # PyMuPDF coordinates.
+                        "block_no": word["block_no"],
+                        "line_no": word["line_no"],
+                        "word_no": word["word_no"],
+                    }
+                )
+
+                previous_text = word_text
+                first_word = False
 
     return "".join(parts), word_spans
 
@@ -474,13 +618,27 @@ def build_sentences_for_page(
     if not page_words:
         return [], document_sentence_index
 
-    blocks = group_words_by_block_and_line(page_words)
+    physical_blocks = group_words_by_block_and_line(page_words)
+
+    logical_block_groups = build_logical_block_groups(physical_blocks)
+
+    # temporary logs for debugging
+    for group in logical_block_groups:
+        if len(group) > 1:
+            print(
+                f"{page['document_id']} "
+                f"page {page['page_number']}: "
+                f"merged physical blocks {group}"
+            )
 
     sentences = []
     page_sentence_index = 0
 
-    for block_no, lines in blocks.items():
-        block_text, word_spans = reconstruct_block(lines)
+    for logical_block_index, block_numbers in enumerate(logical_block_groups):
+        block_text, word_spans = reconstruct_logical_block(
+            block_numbers=block_numbers,
+            physical_blocks=physical_blocks,
+        )
 
         if not block_text.strip():
             continue
@@ -508,12 +666,12 @@ def build_sentences_for_page(
             source_word_indices = [span["page_word_index"] for span in source_spans]
 
             normalized_text = reconstruct_words(
-                source_word_indices=source_word_indices,
+                source_word_indices=(source_word_indices),
                 page_words=page_words,
             )
 
             line_boxes = make_line_boxes(
-                source_word_indices=source_word_indices,
+                source_word_indices=(source_word_indices),
                 page_words=page_words,
             )
 
@@ -524,7 +682,7 @@ def build_sentences_for_page(
             )
 
             sentence_record = {
-                "schema_version": 2,
+                "schema_version": 3,
                 "sentence_builder_version": SENTENCE_BUILDER_VERSION,
                 "sentence_id": sentence_id,
                 "document_id": page["document_id"],
@@ -532,20 +690,22 @@ def build_sentences_for_page(
                 "page_number": page["page_number"],
                 "page_sentence_index": page_sentence_index,
                 "document_sentence_index": document_sentence_index,
-                # In v1, sentences are deliberately not permitted
-                # to cross PyMuPDF text-block boundaries.
-                "block_no": block_no,
+                # Logical block used for retrieval grouping.
+                #
+                # For backwards compatibility, block_no is the
+                # first physical block in the logical group.
+                "block_no": block_numbers[0],
+                "logical_block_index": logical_block_index,
+                # Exact PyMuPDF blocks contributing words to
+                # this sentence.
+                "block_nos": block_numbers,
                 "text": source_text,
                 "text_normalized": normalized_text,
                 "character_count": len(source_text),
                 "source_word_count": len(source_word_indices),
-                # Explicit indices are retained rather than assuming
-                # they will always be contiguous.
                 "source_word_indices": source_word_indices,
-                # Convenience span. word_end is exclusive.
                 "source_word_start": min(source_word_indices),
                 "source_word_end": max(source_word_indices) + 1,
-                # One rectangle per physical PDF line.
                 "boxes": line_boxes,
             }
 
