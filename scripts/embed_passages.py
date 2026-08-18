@@ -199,6 +199,16 @@ def main():
         "batch_size": args.batch_size,
         "max_length": args.max_length,
         "source_passages": str(passages_path),
+        "retrieval_eligible_passages": len(passages),
+        "content_types": sorted(
+            {
+                passage.get(
+                    "content_type",
+                    "body",
+                )
+                for passage in passages
+            }
+        ),
     }
 
     manifest_path = output_dir / "manifest.json"

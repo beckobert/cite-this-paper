@@ -79,7 +79,7 @@ def main():
     parser.add_argument(
         "--embedding-dir",
         type=Path,
-        default=Path("data/embeddings/bge_m3_dense"),
+        default=Path("data/embeddings/bge_m3_dense_filtered"),
     )
 
     parser.add_argument(
