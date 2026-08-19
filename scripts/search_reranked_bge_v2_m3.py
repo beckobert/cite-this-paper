@@ -124,19 +124,6 @@ def rerank_candidates(
             for candidate in batch_candidates
         ]
 
-        # Just for debugging, delete later
-        lengths = tokenizer(
-            pairs,
-            truncation=False,
-            padding=False,
-        )["input_ids"]
-
-        for candidate, ids in zip(batch_candidates, lengths):
-            print(
-                len(ids),
-                candidate["record"]["passage_id"],
-            )
-
         # This follows the input format documented by BAAI for
         # bge-reranker-v2-m3:
         #
