@@ -636,7 +636,7 @@ def main():
     parser.add_argument(
         "--verifier-max-new-tokens",
         type=int,
-        default=220,
+        default=512,
     )
 
     parser.add_argument(
