@@ -21,12 +21,24 @@ retrieval, hybrid rank fusion, Qwen passage reranking, and local Qwen evidence
 verification. The default model stages expect CUDA; pass `--device cpu` to
 `verify-claim` when the selected models support CPU execution.
 
+`verify-claim` prints each verdict with its source metadata, verifier reason,
+and the evidence sentences selected by the verifier. Every displayed sentence
+includes a copy-pasteable `show-sentence` command that renders its original PDF
+location. If the verifier selects no individual sentence, the command clearly
+labels and displays every sentence in the passage as passage-wide evidence.
+Pass `--verbose` to include dense, lexical, fusion, and reranker diagnostics.
+
 Each corpus contains `corpus.sqlite`, managed PDF copies, and one current
 `vectors/embeddings.npy` matrix. If a PDF has identical SHA-256 content to one
 already stored, the CLI asks whether to discard it or replace its managed copy.
-After documents are added, the CLI asks whether to rebuild indexes. Deferring a
-rebuild keeps the old complete index active and causes verification to warn
-that pending documents were not searched.
+After documents are added, the CLI asks whether to rebuild indexes. When a
+corpus still has a pending rebuild, an interactive `verify-claim` run asks
+whether to rebuild, continue with the previous index, or quit. In
+non-interactive use it stops unless `--allow-stale-index` explicitly permits
+using the previous index; pending documents are then not searched.
+
+Verification output is advisory only. It is not guaranteed correct, and the
+user is solely responsible for verifying and deciding how to use the result.
 
 The package includes its own PDF extraction, sentence reconstruction, passage
 construction, and end-matter classification modules. The top-level `scripts/`
