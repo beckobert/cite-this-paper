@@ -1,83 +1,142 @@
 # cite-this-paper
 
-`cite-this-paper` is a local, source-grounded claim-verification tool for
-academic PDFs. A corpus is an independent SQLite-backed database: add PDFs,
-rebuild its retrieval index when a batch is complete, then verify claims
-against its papers.
+`cite-this-paper` is a local package for checking scientific claims against a
+curated collection of academic PDFs. It extracts and indexes the source
+documents, retrieves relevant passages, reranks them, and asks a local verifier
+model to classify their relationship to a claim.
 
-## Quick start
+The package is designed to keep results traceable to their original PDFs. Its
+output is advisory: model verdicts can be wrong, incomplete, or misleading.
+You are solely responsible for checking the evidence and deciding how to use
+the result.
+
+## How the package is built
+
+The unit of work is a **corpus**: an independent database for one research
+purpose. Every command selects a corpus explicitly with `--database`, so PDFs,
+indexes, verification history, and source-review images are never shared
+implicitly between projects.
+
+A corpus directory contains:
+
+- `corpus.sqlite` — documents, extracted pages, sentences, passages, search
+  data, and verification audit records;
+- `pdfs/` — managed copies of the ingested source PDFs;
+- `vectors/embeddings.npy` — the current dense retrieval index;
+- `corpus-config.json` — model names and passage-building settings;
+- `review/` — generated source-page images when evidence is rendered.
+
+Internally, the package has five stages:
+
+1. PDF ingestion extracts page text and word geometry, then reconstructs
+   sentences and retrieval passages.
+2. Passage classification excludes terminal material such as references from
+   retrieval.
+3. Index rebuilding creates dense BGE-M3 embeddings and a SQLite FTS lexical
+   index.
+4. Claim verification combines dense and lexical retrieval, Qwen reranking,
+   and local Qwen passage verification.
+5. Source review renders the selected evidence sentences directly on their PDF
+   pages.
+
+## Standard workflow
+
+Install the package, create a corpus, add PDFs, rebuild its index, and verify a
+claim:
 
 ```bash
-python -m pip install -e .
+python -m pip install .
 
-cite-this-paper init-db data/corpora/water
-cite-this-paper add-directory --database data/corpora/water papers --defer-rebuild
-cite-this-paper rebuild-index --database data/corpora/water
-cite-this-paper verify-claim --database data/corpora/water "Your scientific claim"
+cite-this-paper init-db data/corpora/corpus-001
+cite-this-paper add-directory --database data/corpora/corpus-001 /path/to/papers --defer-rebuild
+cite-this-paper rebuild-index --database data/corpora/corpus-001
+cite-this-paper verify-claim --database data/corpora/corpus-001 "Your scientific claim"
 ```
 
-## Removing corpora
+Use `add-pdf` instead of `add-directory` when adding a single file. New PDFs
+are stored immediately, but do not become searchable until `rebuild-index`
+finishes. The ingestion report states whether rebuilding was completed or
+deferred.
 
-Corpus deletion is permanent. Preview explicitly selected databases before
-deleting them:
+Verification always follows the same sequence:
+
+1. Create an embedding for the claim and retrieve dense and lexical candidates.
+2. Fuse both result lists into a shared candidate ranking.
+3. Rerank the best candidates with the Qwen reranker.
+4. Verify the highest-ranked passages with the Qwen verifier.
+
+The verifier can return `DIRECT_SUPPORT`, `PARTIAL_SUPPORT`, `CONTRADICTS`,
+`RELATED_ONLY`, or `NOT_MENTIONED`. A passage that omits information is not a
+contradiction; `CONTRADICTS` requires explicitly incompatible evidence.
+
+Each verification result includes source metadata, the verifier’s reason, and
+one copy-pasteable command for displaying all selected evidence:
+
+```bash
+cite-this-paper show-sentences --database data/corpora/water <sentence-id> [<sentence-id> ...]
+```
+
+This creates one highlighted image per affected PDF page. If the verifier does
+not select individual sentences, the result treats the entire passage as the
+evidence and provides its sentence IDs instead.
+
+## Additional commands and options
+
+### Ingestion
+
+`add-pdf` and `add-directory` report the PDF currently being processed, any
+duplicate decision, and a final summary. Exact-content duplicates are detected
+by SHA-256 hash.
+
+- `--on-duplicate discard` keeps the stored copy; `replace` updates it. Without
+  either option, an interactive session asks which action to take.
+- `--rebuild` rebuilds immediately; `--defer-rebuild` leaves it for later.
+- `--title`, `--author`, `--year`, `--journal`, `--doi`, and `--citation-key`
+  override document metadata.
+- `--debug` shows low-level extraction diagnostics, including merged physical
+  PDF blocks.
+- `--quiet` hides interim processing messages while keeping the final report.
+
+Currently, only the metadata attached to the PDF or supplied by the user is
+considered. In the future, the package will try to extract the metadata directly
+from the PDF.
+
+### Indexing and verification
+
+`rebuild-index` and `verify-claim` show model and processing progress by
+default. Pass `--quiet` to hide this progress. `verify-claim --verbose` adds
+dense, lexical, fusion, and reranker scores to each result.
+
+If documents have been added since the last index rebuild, interactive
+verification asks whether to rebuild, continue with the old index, or quit. In
+non-interactive use, pass `--allow-stale-index` to search the previous index;
+pending PDFs will not be searched.
+
+The default reranker and verifier use CUDA. Use `--device cpu` when the chosen
+models support CPU execution. Candidate counts can be tuned with
+`--candidate-k`, `--rerank-k`, and `--verify-k`; the standard retrieval,
+reranking, and verification stages remain mandatory.
+
+### Corpus cleanup
+
+`cleanup-databases` permanently removes whole corpus directories, including
+their PDFs, database, vectors, and review images. It previews first; deletion
+requires `--apply`:
 
 ```bash
 cite-this-paper cleanup-databases data/corpora/old-project
 cite-this-paper cleanup-databases data/corpora/old-project --apply
 ```
 
-To find inactive databases, scan `data/corpora` (or choose another parent with
-`--root`) and supply the inactivity threshold in days:
+To find inactive corpora, scan `data/corpora` by default, or provide another
+parent with `--root`:
 
 ```bash
 cite-this-paper cleanup-databases --unused-for 90
-cite-this-paper cleanup-databases --unused-for 90 --root data/corpora --apply
+cite-this-paper cleanup-databases --unused-for 90 --root path/to/corpora --apply
 ```
 
-The package refreshes a corpus’s last-access timestamp whenever a normal corpus
-command runs. This development schema has no migration path: recreate older
-corpora before selecting them with `--unused-for`; they can still be removed by
-an explicit path.
-
-The standard verification workflow always performs dense and lexical
-retrieval, hybrid rank fusion, Qwen passage reranking, and local Qwen evidence
-verification. The default model stages expect CUDA; pass `--device cpu` to
-`verify-claim` when the selected models support CPU execution.
-
-The verifier distinguishes `NOT_MENTIONED` from `RELATED_ONLY`: the former
-means the passage is unrelated to the claim, while the latter means it is
-topically related or merely references relevant work without supporting or
-contradicting the claim. A lack of supporting information is never treated as
-`CONTRADICTS`; contradiction requires explicitly incompatible passage evidence.
-
-`verify-claim` prints each verdict with its source metadata, verifier reason,
-and the evidence sentences selected by the verifier. Every result includes one
-copy-pasteable `show-sentences` command for all displayed evidence; it renders
-one combined highlighted image for each affected PDF page. If the verifier
-selects no individual sentence, the command clearly labels and displays every
-sentence in the passage as passage-wide evidence.
-Pass `--verbose` to include dense, lexical, fusion, and reranker diagnostics.
-
-Ingestion prints the PDF currently being processed and any duplicate decision,
-then ends with a formatted summary. Index rebuild and verification commands
-print their processing stages; `verify-claim` also displays a progress bar while
-it verifies its selected passages. Pass `--quiet` to suppress interim updates
-and progress bars while retaining the final result output. Pass `--debug` to an
-ingestion command for low-level PDF extraction diagnostics.
-
-Each corpus contains `corpus.sqlite`, managed PDF copies, and one current
-`vectors/embeddings.npy` matrix. If a PDF has identical SHA-256 content to one
-already stored, the CLI asks whether to discard it or replace its managed copy.
-After documents are added, the CLI asks whether to rebuild indexes. When a
-corpus still has a pending rebuild, an interactive `verify-claim` run asks
-whether to rebuild, continue with the previous index, or quit. In
-non-interactive use it stops unless `--allow-stale-index` explicitly permits
-using the previous index; pending documents are then not searched.
-
-Verification output is advisory only. It is not guaranteed correct, and the
-user is solely responsible for verifying and deciding how to use the result.
-
-The package includes its own PDF extraction, sentence reconstruction, passage
-construction, and end-matter classification modules. The top-level `scripts/`
-directory remains only as a legacy reference and is not required at runtime or
-included in the package distribution.
+Normal corpus commands update the last-access timestamp used by age-based
+cleanup. The schema is intentionally development-oriented and has no migration
+path: recreate corpora after incompatible schema changes. Explicit cleanup can
+still remove an older corpus by path.
