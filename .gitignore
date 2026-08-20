@@ -2,3 +2,5 @@
 papers/*
 data/*
 scripts/__pycache__
+.codex
+.codex-mem
