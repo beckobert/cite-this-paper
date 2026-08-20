@@ -21,8 +21,8 @@ dependencies = [
 cite-this-paper = "cite_this_paper.cli:main"
 
 [tool.setuptools.packages.find]
-where = ["src", "."]
-include = ["cite_this_paper*", "scripts*"]
+where = ["src"]
+include = ["cite_this_paper*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

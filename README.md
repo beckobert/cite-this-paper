@@ -28,6 +28,7 @@ After documents are added, the CLI asks whether to rebuild indexes. Deferring a
 rebuild keeps the old complete index active and causes verification to warn
 that pending documents were not searched.
 
-The original scripts remain available as reference and are reused for the
-established extraction, sentence reconstruction, passage construction, and
-end-matter classification heuristics during this transition.
+The package includes its own PDF extraction, sentence reconstruction, passage
+construction, and end-matter classification modules. The top-level `scripts/`
+directory remains only as a legacy reference and is not required at runtime or
+included in the package distribution.

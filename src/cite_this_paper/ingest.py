@@ -8,10 +8,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Literal
 
-from scripts.build_passages import build_passages_for_block, group_sentences
-from scripts.build_sentences import build_sentences_for_page, create_nlp
-from scripts.classify_passages import classify_document
-from scripts.extract_pdfs import extract_pdf
+from .processing.classification import classify_document
+from .processing.passages import build_passages_for_block, group_sentences
+from .processing.pdf_extraction import extract_pdf
+from .processing.sentences import build_sentences_for_page, create_nlp
 
 from .corpus import Corpus, CorpusError, DuplicateDocumentError, utc_now
 
