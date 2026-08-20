@@ -11,7 +11,7 @@ from typing import Any, Sequence
 import numpy as np
 
 from .corpus import Corpus, CorpusError
-from .indexing import BGEEmbeddingModel, EmbeddingModel, normalize_rows, require_matrix
+from .indexing import BGEEmbeddingModel, EmbeddingModel, close_model, normalize_rows, require_matrix
 from .models import (
     VERIFIER_PROMPT_VERSION,
     ClaimVerifier,
@@ -20,6 +20,7 @@ from .models import (
     QwenPassageReranker,
     VerificationOutput,
 )
+from .progress import ProgressReporter, make_progress, report_stage
 
 
 @dataclass
@@ -232,20 +233,24 @@ def verify_claim(
     rerank_k: int = 30,
     verify_k: int = 10,
     device: str = "cuda:0",
+    reporter: ProgressReporter | None = None,
 ) -> tuple[int, str | None, list[Candidate]]:
     """Run the required hybrid retrieval, reranking, and verification sequence."""
     if not claim.strip():
         raise CorpusError("The claim cannot be empty.")
     config = corpus.config()
-    embedding_model = embedding_model or BGEEmbeddingModel(config["embedding_model"])
-    reranker = reranker or QwenPassageReranker(config["reranker_model"], device=device)
-    verifier = verifier or QwenClaimVerifier(config["verifier_model"], device=device)
     state = corpus.state()
     warning = None
     if state["index_status"] == "rebuild_required":
         warning = "The corpus has newly ingested documents that are pending index rebuild and were not searched."
     if state["index_status"] == "empty":
         raise CorpusError("This corpus has no index yet. Run rebuild-index first.")
+    owns_embedding_model = embedding_model is None
+    owns_reranker = reranker is None
+    owns_verifier = verifier is None
+    embedding_model = embedding_model or BGEEmbeddingModel(config["embedding_model"])
+    reranker = reranker or QwenPassageReranker(config["reranker_model"], device=device)
+    verifier = verifier or QwenClaimVerifier(config["verifier_model"], device=device)
     run_id = _create_run(
         corpus, claim, embedding_model, reranker, verifier, warning,
         {
@@ -256,23 +261,55 @@ def verify_claim(
         },
     )
     try:
+        report_stage(reporter, f"Loading embedding model: {embedding_model.name}")
+        report_stage(reporter, "Creating claim embedding and retrieving dense and lexical candidates...")
         candidates = hybrid_search(corpus, claim, embedding_model, candidate_k=candidate_k)
+        report_stage(reporter, f"Retrieved {len(candidates)} hybrid candidate passage(s).")
+        if owns_embedding_model:
+            report_stage(reporter, "Dropping embedding model from memory...")
+            close_model(embedding_model)
+            owns_embedding_model = False
+
         reranked = candidates[:rerank_k]
+        report_stage(reporter, f"Loading reranker model: {reranker.name}")
+        report_stage(reporter, f"Reranking {len(reranked)} candidate passage(s)...")
         scores = reranker.rerank(claim, [candidate.record["normalized_text"] for candidate in reranked])
         for candidate, (score, logit) in zip(reranked, scores, strict=True):
             candidate.rerank_score, candidate.rerank_logit = score, logit
         reranked.sort(key=lambda candidate: candidate.rerank_score or 0.0, reverse=True)
         for rank, candidate in enumerate(reranked, start=1):
             candidate.rerank_rank = rank
+        if owns_reranker:
+            report_stage(reporter, "Dropping reranker model from memory...")
+            close_model(reranker)
+            owns_reranker = False
+
         verified = reranked[:verify_k]
-        for candidate in verified:
-            numbered, tags = _numbered_sentences(corpus, candidate.passage_id)
-            verdict = verifier.verify(claim, numbered)
-            candidate.verification = verdict
-            candidate.evidence_sentence_ids = [tags[tag] for tag in verdict.evidence_tags if tag in tags]
+        if verified:
+            report_stage(reporter, f"Loading verifier model: {verifier.name}")
+            progress = make_progress(reporter, "Verifying passages", len(verified))
+            try:
+                for candidate in verified:
+                    numbered, tags = _numbered_sentences(corpus, candidate.passage_id)
+                    verdict = verifier.verify(claim, numbered)
+                    candidate.verification = verdict
+                    candidate.evidence_sentence_ids = [tags[tag] for tag in verdict.evidence_tags if tag in tags]
+                    progress.advance()
+            finally:
+                progress.close()
+        else:
+            report_stage(reporter, "No passages remained after reranking; skipping verification.")
+
+        if owns_verifier:
+            report_stage(reporter, "Dropping verifier model from memory...")
+            close_model(verifier)
+            owns_verifier = False
+        report_stage(reporter, "Saving the verification audit record...")
         _save_run(corpus, run_id, candidates)
+        report_stage(reporter, "Verification processing complete.")
         return run_id, warning, verified
     except Exception as error:
+        report_stage(reporter, f"Verification failed: {type(error).__name__}: {error}")
         with corpus.connect() as connection:
             connection.execute(
                 "UPDATE verification_runs SET status = 'failed', error_message = ?, completed_at = ? WHERE id = ?",
@@ -280,3 +317,13 @@ def verify_claim(
             )
             connection.commit()
         raise
+    finally:
+        if owns_embedding_model:
+            report_stage(reporter, "Dropping embedding model from memory...")
+            close_model(embedding_model)
+        if owns_reranker:
+            report_stage(reporter, "Dropping reranker model from memory...")
+            close_model(reranker)
+        if owns_verifier:
+            report_stage(reporter, "Dropping verifier model from memory...")
+            close_model(verifier)

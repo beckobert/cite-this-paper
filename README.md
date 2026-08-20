@@ -35,6 +35,13 @@ selects no individual sentence, the command clearly labels and displays every
 sentence in the passage as passage-wide evidence.
 Pass `--verbose` to include dense, lexical, fusion, and reranker diagnostics.
 
+Ingestion prints the PDF currently being processed and any duplicate decision,
+then ends with a formatted summary. Index rebuild and verification commands
+print their processing stages; `verify-claim` also displays a progress bar while
+it verifies its selected passages. Pass `--quiet` to suppress interim updates
+and progress bars while retaining the final result output. Pass `--debug` to an
+ingestion command for low-level PDF extraction diagnostics.
+
 Each corpus contains `corpus.sqlite`, managed PDF copies, and one current
 `vectors/embeddings.npy` matrix. If a PDF has identical SHA-256 content to one
 already stored, the CLI asks whether to discard it or replace its managed copy.

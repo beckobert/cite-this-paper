@@ -13,6 +13,7 @@ from typing import Protocol, Sequence
 import numpy as np
 
 from .corpus import Corpus, CorpusError
+from .progress import ProgressReporter, report_stage
 
 
 class EmbeddingModel(Protocol):
@@ -46,6 +47,13 @@ class BGEEmbeddingModel:
         )
         return normalize_rows(np.asarray(output["dense_vecs"], dtype=np.float32))
 
+    def close(self) -> None:
+        """Release the loaded model and any CUDA memory it held."""
+        had_model = self._model is not None
+        self._model = None
+        if had_model:
+            _collect_model_memory()
+
 
 @dataclass(frozen=True)
 class IndexResult:
@@ -62,9 +70,36 @@ def normalize_rows(vectors: np.ndarray) -> np.ndarray:
     return np.divide(vectors, norms, out=np.zeros_like(vectors), where=norms > 1e-12)
 
 
-def rebuild_index(corpus: Corpus, model: EmbeddingModel | None = None) -> IndexResult:
+def _collect_model_memory() -> None:
+    """Best-effort release that keeps CPU-only installations lightweight."""
+    import gc
+
+    gc.collect()
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except ImportError:
+        pass
+
+
+def close_model(model: object) -> None:
+    """Close built-in model adapters without imposing cleanup on custom models."""
+    close = getattr(model, "close", None)
+    if callable(close):
+        close()
+
+
+def rebuild_index(
+    corpus: Corpus,
+    model: EmbeddingModel | None = None,
+    *,
+    reporter: ProgressReporter | None = None,
+) -> IndexResult:
     """Replace the current matrix and FTS contents with the current eligible passages."""
     config = corpus.config()
+    owns_model = model is None
     model = model or BGEEmbeddingModel(config["embedding_model"])
     with corpus.connect() as connection:
         rows = connection.execute(
@@ -77,15 +112,21 @@ def rebuild_index(corpus: Corpus, model: EmbeddingModel | None = None) -> IndexR
             """
         ).fetchall()
     texts = [row["normalized_text"] for row in rows]
-    if texts:
-        matrix = normalize_rows(model.encode(texts))
-    else:
-        matrix = np.empty((0, 0), dtype=np.float32)
-    temporary_path = corpus.vectors_path / f".embeddings-{uuid.uuid4().hex}.npy"
-    np.save(temporary_path, matrix)
-
     try:
+        if texts:
+            report_stage(reporter, f"Loading embedding model: {model.name}")
+            report_stage(reporter, f"Creating embeddings for {len(texts)} passage(s)...")
+            matrix = normalize_rows(model.encode(texts))
+            report_stage(reporter, "Passage embeddings created.")
+        else:
+            report_stage(reporter, "No retrieval-eligible passages found; creating an empty index.")
+            matrix = np.empty((0, 0), dtype=np.float32)
+        temporary_path = corpus.vectors_path / f".embeddings-{uuid.uuid4().hex}.npy"
+        report_stage(reporter, "Writing the new vector matrix...")
+        np.save(temporary_path, matrix)
+
         with corpus.connect() as connection:
+            report_stage(reporter, "Rebuilding the lexical search index...")
             connection.execute("UPDATE passages SET embedding_row = NULL")
             connection.execute("DELETE FROM passages_fts")
             for row_number, row in enumerate(rows):
@@ -113,10 +154,16 @@ def rebuild_index(corpus: Corpus, model: EmbeddingModel | None = None) -> IndexR
                 ),
             )
             connection.commit()
+        report_stage(reporter, "Activating the rebuilt index...")
         os.replace(temporary_path, corpus.matrix_path)
     except Exception:
-        temporary_path.unlink(missing_ok=True)
+        if "temporary_path" in locals():
+            temporary_path.unlink(missing_ok=True)
         raise
+    finally:
+        if owns_model:
+            report_stage(reporter, "Dropping embedding model from memory...")
+            close_model(model)
     dimensions = int(matrix.shape[1]) if matrix.ndim == 2 and matrix.shape[0] else 0
     return IndexResult(len(rows), dimensions, corpus.matrix_path)
 

@@ -11,6 +11,7 @@ from pathlib import Path
 from .corpus import Corpus, CorpusError, DuplicateDocumentError
 from .indexing import rebuild_index
 from .ingest import IngestResult, ingest_directory, ingest_pdf
+from .progress import ConsoleReporter, ProgressReporter
 from .retrieval import verify_claim
 from .review import render_sentences
 
@@ -42,9 +43,21 @@ def _add_metadata_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--citation-key")
 
 
-def _ingest_one(corpus: Corpus, source: Path, args: argparse.Namespace) -> IngestResult:
+def _ingest_one(
+    corpus: Corpus,
+    source: Path,
+    args: argparse.Namespace,
+    reporter: ProgressReporter | None = None,
+) -> IngestResult:
     try:
-        return ingest_pdf(corpus, source, on_duplicate=args.on_duplicate, metadata_overrides=_metadata_from_args(args))
+        return ingest_pdf(
+            corpus,
+            source,
+            on_duplicate=args.on_duplicate,
+            metadata_overrides=_metadata_from_args(args),
+            reporter=reporter,
+            debug=getattr(args, "debug", False),
+        )
     except DuplicateDocumentError as error:
         if not sys.stdin.isatty():
             raise CorpusError(
@@ -52,28 +65,60 @@ def _ingest_one(corpus: Corpus, source: Path, args: argparse.Namespace) -> Inges
             ) from error
         answer = input(f"{source.name} already exists. [d]iscard or [r]eplace? ").strip().lower()
         if answer in {"r", "replace"}:
-            return ingest_pdf(corpus, source, on_duplicate="replace", metadata_overrides=_metadata_from_args(args))
+            return ingest_pdf(
+                corpus, source, on_duplicate="replace", metadata_overrides=_metadata_from_args(args),
+                reporter=reporter, debug=getattr(args, "debug", False),
+            )
         if answer in {"d", "discard", ""}:
-            return ingest_pdf(corpus, source, on_duplicate="discard", metadata_overrides=_metadata_from_args(args))
+            return ingest_pdf(
+                corpus, source, on_duplicate="discard", metadata_overrides=_metadata_from_args(args),
+                reporter=reporter, debug=getattr(args, "debug", False),
+            )
         raise CorpusError("Duplicate choice must be discard or replace.")
 
 
-def _maybe_rebuild(corpus: Corpus, args: argparse.Namespace, added: bool) -> None:
+def _maybe_rebuild(
+    corpus: Corpus,
+    args: argparse.Namespace,
+    added: bool,
+    reporter: ProgressReporter | None = None,
+) -> str:
     if not added:
-        return
+        return "Unchanged (no new PDFs added)"
     rebuild = args.rebuild
     if not args.rebuild and not args.defer_rebuild and sys.stdin.isatty():
         rebuild = input("Rebuild the retrieval index now? [y/N] ").strip().lower() in {"y", "yes"}
     if rebuild:
-        result = rebuild_index(corpus)
-        print(f"Rebuilt {result.indexed_passages} passages ({result.dimensions} dimensions).")
-    else:
-        print("Index rebuild deferred. Existing verification uses the previous index with a warning.")
+        result = rebuild_index(corpus, reporter=reporter)
+        return f"Rebuilt ({result.indexed_passages} passages, {result.dimensions} dimensions)"
+    return "Deferred (new PDFs are not searchable until rebuild-index runs)"
 
 
-def _print_result(result: IngestResult) -> None:
-    detail = f" ({result.message})" if result.message else ""
-    print(f"{result.status:9} {result.source}{detail}")
+def _print_ingestion_report(corpus: Corpus, results: list[IngestResult], index_status: str) -> None:
+    """Render one compact result summary for an ingestion command."""
+    statuses = ("added", "replaced", "discarded", "failed")
+    counts = {status: sum(result.status == status for result in results) for status in statuses}
+    print()
+    print("=" * 72)
+    print("INGESTION REPORT")
+    print("=" * 72)
+    print(f"Corpus:    {corpus.root}")
+    print(f"Processed: {len(results)} PDF(s)")
+    print()
+    print("Results")
+    print(f"  Added:     {counts['added']}")
+    print(f"  Replaced:  {counts['replaced']}")
+    print(f"  Duplicates kept: {counts['discarded']}")
+    print(f"  Failed:    {counts['failed']}")
+    print()
+    print(f"Index: {index_status}")
+    failures = [result for result in results if result.status == "failed"]
+    if failures:
+        print()
+        print("Failures")
+        for result in failures:
+            print(f"  - {result.source.name}: {result.message or 'Unknown error'}")
+    print("=" * 72)
 
 
 def _sentence_records(corpus: Corpus, sentence_ids: list[int]) -> list[dict]:
@@ -225,7 +270,11 @@ def _print_verification_output(
     print(RESPONSIBILITY_NOTICE)
 
 
-def _prepare_verification(corpus: Corpus, args: argparse.Namespace) -> bool:
+def _prepare_verification(
+    corpus: Corpus,
+    args: argparse.Namespace,
+    reporter: ProgressReporter | None = None,
+) -> bool:
     """Resolve a pending index rebuild before any verification run is created."""
     if corpus.state()["index_status"] != "rebuild_required":
         return True
@@ -244,7 +293,7 @@ def _prepare_verification(corpus: Corpus, args: argparse.Namespace) -> bool:
             "[r]ebuild now, [c]ontinue with the previous index, or [q]uit? [q]: "
         ).strip().lower()
         if answer in {"r", "rebuild"}:
-            result = rebuild_index(corpus)
+            result = rebuild_index(corpus) if reporter is None else rebuild_index(corpus, reporter=reporter)
             print(f"Rebuilt {result.indexed_passages} passages ({result.dimensions} dimensions).")
             return True
         if answer in {"c", "continue"}:
@@ -270,10 +319,13 @@ def build_parser() -> argparse.ArgumentParser:
         rebuild_group = add.add_mutually_exclusive_group()
         rebuild_group.add_argument("--rebuild", action="store_true")
         rebuild_group.add_argument("--defer-rebuild", action="store_true")
+        add.add_argument("--quiet", action="store_true", help="Suppress processing updates and progress bars.")
+        add.add_argument("--debug", action="store_true", help="Show low-level PDF extraction diagnostics.")
         _add_metadata_arguments(add)
 
     rebuild = commands.add_parser("rebuild-index", help="Rebuild dense and lexical indexes.")
     rebuild.add_argument("--database", required=True, type=Path)
+    rebuild.add_argument("--quiet", action="store_true", help="Suppress processing updates and progress bars.")
 
     verify = commands.add_parser("verify-claim", help="Retrieve, rerank, and verify evidence for a claim.")
     verify.add_argument("--database", required=True, type=Path)
@@ -283,6 +335,7 @@ def build_parser() -> argparse.ArgumentParser:
     verify.add_argument("--verify-k", type=int, default=10)
     verify.add_argument("--device", default="cuda:0")
     verify.add_argument("--verbose", action="store_true", help="Show retrieval and reranking diagnostics.")
+    verify.add_argument("--quiet", action="store_true", help="Suppress processing updates and progress bars.")
     verify.add_argument(
         "--allow-stale-index",
         action="store_true",
@@ -308,29 +361,31 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Created corpus: {args.database.resolve()}")
             return 0
         corpus = Corpus.open(args.database)
+        reporter = ConsoleReporter(quiet=args.quiet)
         if args.command == "add-pdf":
-            result = _ingest_one(corpus, args.source, args)
-            _print_result(result)
-            _maybe_rebuild(corpus, args, result.status == "added")
+            result = _ingest_one(corpus, args.source, args, reporter)
+            index_status = _maybe_rebuild(corpus, args, result.status == "added", reporter)
+            _print_ingestion_report(corpus, [result], index_status)
             return 0 if result.status != "failed" else 1
         if args.command == "add-directory":
             results: list[IngestResult] = []
-            for source in sorted(args.source.expanduser().resolve().rglob("*.pdf")):
-                result = _ingest_one(corpus, source, args)
+            sources = sorted(args.source.expanduser().resolve().rglob("*.pdf"))
+            for source in sources:
+                result = _ingest_one(corpus, source, args, reporter)
                 results.append(result)
-                _print_result(result)
-            _maybe_rebuild(corpus, args, any(result.status == "added" for result in results))
+            index_status = _maybe_rebuild(corpus, args, any(result.status == "added" for result in results), reporter)
+            _print_ingestion_report(corpus, results, index_status)
             return 1 if any(result.status == "failed" for result in results) else 0
         if args.command == "rebuild-index":
-            result = rebuild_index(corpus)
+            result = rebuild_index(corpus, reporter=reporter)
             print(f"Rebuilt {result.indexed_passages} passages ({result.dimensions} dimensions).")
             return 0
         if args.command == "verify-claim":
-            if not _prepare_verification(corpus, args):
+            if not _prepare_verification(corpus, args, reporter):
                 return 0
             run_id, warning, results = verify_claim(
                 corpus, args.claim, candidate_k=args.candidate_k, rerank_k=args.rerank_k,
-                verify_k=args.verify_k, device=args.device,
+                verify_k=args.verify_k, device=args.device, reporter=reporter,
             )
             _print_verification_output(
                 corpus,

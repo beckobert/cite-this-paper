@@ -624,6 +624,8 @@ def build_sentences_for_page(
     page: dict,
     nlp,
     document_sentence_index: int,
+    *,
+    debug: bool = False,
 ):
     """
     Build sentence records for one page.
@@ -641,14 +643,14 @@ def build_sentences_for_page(
 
     logical_block_groups = build_logical_block_groups(physical_blocks)
 
-    # temporary logs for debugging
-    for group in logical_block_groups:
-        if len(group) > 1:
-            print(
-                f"{page['document_id']} "
-                f"page {page['page_number']}: "
-                f"merged physical blocks {group}"
-            )
+    if debug:
+        for group in logical_block_groups:
+            if len(group) > 1:
+                print(
+                    f"{page['document_id']} "
+                    f"page {page['page_number']}: "
+                    f"merged physical blocks {group}"
+                )
 
     sentences = []
     page_sentence_index = 0
@@ -734,5 +736,4 @@ def build_sentences_for_page(
             document_sentence_index += 1
 
     return sentences, document_sentence_index
-
 

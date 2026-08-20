@@ -210,6 +210,16 @@ class QwenPassageReranker:
             )
         return [(float(score), float(logit)) for score, logit in results]
 
+    def close(self) -> None:
+        """Release the loaded model, tokenizer, and CUDA cache."""
+        had_resources = self._model is not None or self._tokenizer is not None
+        self._model = None
+        self._tokenizer = None
+        self._no_token = None
+        self._yes_token = None
+        if had_resources:
+            _collect_model_memory()
+
 
 class QwenClaimVerifier:
     """Instruction-model adapter that produces a structured evidence verdict."""
@@ -268,3 +278,25 @@ class QwenClaimVerifier:
             generated[0, input_length:], skip_special_tokens=True
         ).strip()
         return parse_verification_output(raw)
+
+    def close(self) -> None:
+        """Release the loaded model, tokenizer, and CUDA cache."""
+        had_resources = self._model is not None or self._tokenizer is not None
+        self._model = None
+        self._tokenizer = None
+        if had_resources:
+            _collect_model_memory()
+
+
+def _collect_model_memory() -> None:
+    """Best-effort cleanup for both CPU-only and CUDA-enabled installations."""
+    import gc
+
+    gc.collect()
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except ImportError:
+        pass

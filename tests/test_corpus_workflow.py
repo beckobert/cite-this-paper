@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from collections import OrderedDict
 from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from pathlib import Path
@@ -23,6 +24,8 @@ from cite_this_paper.models import (
     VerificationOutput,
     parse_verification_output,
 )
+from cite_this_paper.progress import ConsoleReporter
+from cite_this_paper.processing import sentences as sentence_processing
 from cite_this_paper.review import render_sentences
 from cite_this_paper.retrieval import verify_claim
 
@@ -67,6 +70,64 @@ class NoTagContradictionVerifier:
 
     def verify(self, claim, numbered_sentences):
         return VerificationOutput("CONTRADICTS", [], "Test contradiction without sentence tags")
+
+
+class RecordingProgress:
+    def __init__(self, description, total):
+        self.description = description
+        self.total = total
+        self.advanced = 0
+        self.closed = False
+
+    def advance(self, amount=1):
+        self.advanced += amount
+
+    def close(self):
+        self.closed = True
+
+
+class RecordingReporter:
+    def __init__(self):
+        self.stages = []
+        self.bars = []
+
+    def stage(self, message):
+        self.stages.append(message)
+
+    def progress(self, description, total):
+        bar = RecordingProgress(description, total)
+        self.bars.append(bar)
+        return bar
+
+
+class ClosingEmbeddingModel(FakeEmbeddingModel):
+    name = "closing-embedding"
+
+    def __init__(self):
+        self.closed = False
+
+    def close(self):
+        self.closed = True
+
+
+class ClosingReranker(FakeReranker):
+    name = "closing-reranker"
+
+    def __init__(self):
+        self.closed = False
+
+    def close(self):
+        self.closed = True
+
+
+class ClosingVerifier(FakeVerifier):
+    name = "closing-verifier"
+
+    def __init__(self):
+        self.closed = False
+
+    def close(self):
+        self.closed = True
 
 
 def create_pdf(path: Path, text: str) -> None:
@@ -133,6 +194,116 @@ class CorpusWorkflowTests(unittest.TestCase):
                 ).fetchone()[0]
             )
         self.assertEqual(config["verifier_prompt_version"], VERIFIER_PROMPT_VERSION)
+
+    def test_processing_reporter_describes_stages_and_verifier_progress(self):
+        reporter = RecordingReporter()
+        ingest_pdf(self.corpus, self.pdf, on_duplicate="discard", reporter=reporter)
+        self.assertEqual(reporter.stages, ["Processing PDF: paper.pdf"])
+        ingest_pdf(self.corpus, self.pdf, on_duplicate="discard", reporter=reporter)
+        self.assertIn("Duplicate document found; keeping the existing copy.", reporter.stages)
+
+        rebuild_index(self.corpus, FakeEmbeddingModel(), reporter=reporter)
+        self.assertIn("Creating embeddings for 1 passage(s)...", reporter.stages)
+        self.assertIn("Rebuilding the lexical search index...", reporter.stages)
+
+        verify_claim(
+            self.corpus,
+            "This passage is scientific evidence.",
+            embedding_model=FakeEmbeddingModel(),
+            reranker=FakeReranker(),
+            verifier=FakeVerifier(),
+            candidate_k=10,
+            rerank_k=5,
+            verify_k=1,
+            reporter=reporter,
+        )
+        self.assertIn("Creating claim embedding and retrieving dense and lexical candidates...", reporter.stages)
+        self.assertIn("Saving the verification audit record...", reporter.stages)
+        self.assertEqual(len(reporter.bars), 1)
+        self.assertEqual(reporter.bars[0].description, "Verifying passages")
+        self.assertEqual(reporter.bars[0].total, 1)
+        self.assertEqual(reporter.bars[0].advanced, 1)
+        self.assertTrue(reporter.bars[0].closed)
+
+    def test_ingestion_report_summarizes_results_and_failures(self):
+        output = StringIO()
+        results = [
+            cli.IngestResult(self.pdf, "added"),
+            cli.IngestResult(self.root / "duplicate.pdf", "discarded"),
+            cli.IngestResult(self.root / "broken.pdf", "failed", message="Unreadable PDF"),
+        ]
+        with redirect_stdout(output):
+            cli._print_ingestion_report(self.corpus, results, "Deferred (new PDFs are not searchable until rebuild-index runs)")
+        text = output.getvalue()
+        self.assertIn("INGESTION REPORT", text)
+        self.assertIn("Processed: 3 PDF(s)", text)
+        self.assertIn("Added:     1", text)
+        self.assertIn("Duplicates kept: 1", text)
+        self.assertIn("Failed:    1", text)
+        self.assertIn("broken.pdf: Unreadable PDF", text)
+
+    def test_quiet_ingestion_keeps_the_final_report(self):
+        output = StringIO()
+        with patch("cite_this_paper.cli._ingest_one", return_value=cli.IngestResult(self.pdf, "added")), redirect_stdout(output):
+            result = cli.main([
+                "add-pdf", "--database", str(self.corpus.root), str(self.pdf), "--defer-rebuild", "--quiet"
+            ])
+        text = output.getvalue()
+        self.assertEqual(result, 0)
+        self.assertIn("INGESTION REPORT", text)
+        self.assertNotIn("Processing PDF:", text)
+
+    def test_automatic_models_are_released_after_verification(self):
+        ingest_pdf(self.corpus, self.pdf, on_duplicate="discard")
+        rebuild_index(self.corpus, FakeEmbeddingModel())
+        embedding = ClosingEmbeddingModel()
+        reranker = ClosingReranker()
+        verifier = ClosingVerifier()
+        with (
+            patch("cite_this_paper.retrieval.BGEEmbeddingModel", return_value=embedding),
+            patch("cite_this_paper.retrieval.QwenPassageReranker", return_value=reranker),
+            patch("cite_this_paper.retrieval.QwenClaimVerifier", return_value=verifier),
+        ):
+            verify_claim(self.corpus, "This passage is scientific evidence.", candidate_k=10, rerank_k=5, verify_k=1)
+        self.assertTrue(embedding.closed)
+        self.assertTrue(reranker.closed)
+        self.assertTrue(verifier.closed)
+
+    def test_console_reporter_quiet_mode_and_cli_flags(self):
+        output = StringIO()
+        ConsoleReporter(stream=output).stage("Visible stage")
+        ConsoleReporter(quiet=True, stream=output).stage("Hidden stage")
+        self.assertEqual(output.getvalue(), "Visible stage\n")
+        parser = cli.build_parser()
+        self.assertTrue(parser.parse_args(["rebuild-index", "--database", "corpus", "--quiet"]).quiet)
+        self.assertTrue(parser.parse_args(["verify-claim", "--database", "corpus", "claim", "--quiet"]).quiet)
+
+    def test_physical_block_merge_diagnostics_require_debug(self):
+        page = {"document_id": "paper", "page_number": 1, "words": [{"text": "placeholder"}]}
+        physical_blocks = OrderedDict([(1, []), (2, [])])
+        output = StringIO()
+        with (
+            patch.object(sentence_processing, "group_words_by_block_and_line", return_value=physical_blocks),
+            patch.object(sentence_processing, "build_logical_block_groups", return_value=[[1, 2]]),
+            patch.object(sentence_processing, "reconstruct_logical_block", return_value=("", [])),
+            redirect_stdout(output),
+        ):
+            sentence_processing.build_sentences_for_page(page, None, 0)
+        self.assertEqual(output.getvalue(), "")
+
+        with (
+            patch.object(sentence_processing, "group_words_by_block_and_line", return_value=physical_blocks),
+            patch.object(sentence_processing, "build_logical_block_groups", return_value=[[1, 2]]),
+            patch.object(sentence_processing, "reconstruct_logical_block", return_value=("", [])),
+            redirect_stdout(output),
+        ):
+            sentence_processing.build_sentences_for_page(page, None, 0, debug=True)
+        self.assertIn("merged physical blocks [1, 2]", output.getvalue())
+
+    def test_add_commands_accept_debug_flag(self):
+        parser = cli.build_parser()
+        self.assertTrue(parser.parse_args(["add-pdf", "--database", "corpus", "paper.pdf", "--debug"]).debug)
+        self.assertTrue(parser.parse_args(["add-directory", "--database", "corpus", "papers", "--debug"]).debug)
 
     def test_verifier_label_contract_and_prompt_distinguish_unrelated_content(self):
         self.assertIn("NOT_MENTIONED", VERDICT_LABELS)

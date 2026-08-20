@@ -14,6 +14,7 @@ from .processing.pdf_extraction import extract_pdf
 from .processing.sentences import build_sentences_for_page, create_nlp
 
 from .corpus import Corpus, CorpusError, DuplicateDocumentError, utc_now
+from .progress import ProgressReporter, report_stage
 
 DuplicatePolicy = Literal["ask", "discard", "replace"]
 
@@ -57,7 +58,7 @@ def _metadata_values(document: dict[str, Any], overrides: dict[str, Any] | None)
     return values
 
 
-def _build_sentences(pages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _build_sentences(pages: list[dict[str, Any]], *, debug: bool = False) -> list[dict[str, Any]]:
     nlp = create_nlp("en")
     by_document_index: dict[str, int] = {}
     records: list[dict[str, Any]] = []
@@ -66,7 +67,7 @@ def _build_sentences(pages: list[dict[str, Any]]) -> list[dict[str, Any]]:
             continue
         document_id = page["document_id"]
         starting_index = by_document_index.get(document_id, 0)
-        sentences, next_index = build_sentences_for_page(page, nlp, starting_index)
+        sentences, next_index = build_sentences_for_page(page, nlp, starting_index, debug=debug)
         by_document_index[document_id] = next_index
         records.extend(sentences)
     return records
@@ -132,11 +133,14 @@ def ingest_pdf(
     *,
     on_duplicate: DuplicatePolicy = "ask",
     metadata_overrides: dict[str, Any] | None = None,
+    reporter: ProgressReporter | None = None,
+    debug: bool = False,
 ) -> IngestResult:
     """Add one PDF, or apply the requested policy to an exact-content duplicate."""
     source = source.expanduser().resolve()
     if not source.is_file() or source.suffix.lower() != ".pdf":
         raise CorpusError(f"Not a PDF file: {source}")
+    report_stage(reporter, f"Processing PDF: {source.name}")
     sha256 = sha256_file(source)
     with corpus.connect() as connection:
         row = connection.execute("SELECT * FROM documents WHERE sha256 = ?", (sha256,)).fetchone()
@@ -145,12 +149,14 @@ def ingest_pdf(
         if on_duplicate == "ask":
             raise DuplicateDocumentError(existing)
         if on_duplicate == "discard":
+            report_stage(reporter, "Duplicate document found; keeping the existing copy.")
             return IngestResult(source, "discarded", existing["id"])
+        report_stage(reporter, "Duplicate document found; replacing its managed copy and metadata.")
         return _replace_duplicate(corpus, source, sha256, existing, metadata_overrides)
 
     try:
         extracted_document, pages = extract_pdf(source, source.parent)
-        sentences = _build_sentences(pages)
+        sentences = _build_sentences(pages, debug=debug)
         config = corpus.config()
         passages = _build_passages(
             sentences,
@@ -278,10 +284,20 @@ def ingest_directory(
     *,
     on_duplicate: DuplicatePolicy = "ask",
     metadata_overrides: dict[str, Any] | None = None,
+    reporter: ProgressReporter | None = None,
+    debug: bool = False,
 ) -> list[IngestResult]:
     """Ingest every PDF below a directory in stable path order."""
     directory = directory.expanduser().resolve()
+    paths = sorted(directory.rglob("*.pdf"))
     return [
-        ingest_pdf(corpus, path, on_duplicate=on_duplicate, metadata_overrides=metadata_overrides)
-        for path in sorted(directory.rglob("*.pdf"))
+        ingest_pdf(
+            corpus,
+            path,
+            on_duplicate=on_duplicate,
+            metadata_overrides=metadata_overrides,
+            reporter=reporter,
+            debug=debug,
+        )
+        for path in paths
     ]
