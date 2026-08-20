@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cite-this-paper"
+version = "0.1.0"
+description = "Local, source-grounded claim verification for academic PDFs"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "pymupdf>=1.24",
+    "spacy>=3.7",
+    "numpy>=1.26",
+    "FlagEmbedding>=1.2",
+    "torch>=2.2",
+    "transformers>=4.48",
+]
+
+[project.scripts]
+cite-this-paper = "cite_this_paper.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src", "."]
+include = ["cite_this_paper*", "scripts*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
