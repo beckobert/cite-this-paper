@@ -1,8 +1,4 @@
-#!/usr/bin/env python3
-
-import argparse
 import hashlib
-import json
 from pathlib import Path
 
 import pymupdf
@@ -42,31 +38,7 @@ def extract_word(word_tuple: tuple) -> dict:
     }
 
 
-def extract_block(block_tuple: tuple) -> dict:
-    """
-    Convert a PyMuPDF block tuple into a dictionary.
-
-    PyMuPDF returns:
-        x0, y0, x1, y1, text, block_no, block_type
-
-    block_type == 0 means text.
-    """
-    x0, y0, x1, y1, text, block_no, block_type = block_tuple
-
-    return {
-        "text": text,
-        "bbox": [
-            round(x0, 3),
-            round(y0, 3),
-            round(x1, 3),
-            round(y1, 3),
-        ],
-        "block_no": block_no,
-        "block_type": block_type,
-    }
-
-
-def extract_pdf(pdf_path: Path, input_dir: Path) -> tuple[dict, list[dict]]:
+def extract_pdf(pdf_path: Path) -> tuple[dict, list[dict]]:
     """
     Extract document-level metadata and page-level text/provenance.
     """
@@ -85,9 +57,7 @@ def extract_pdf(pdf_path: Path, input_dir: Path) -> tuple[dict, list[dict]]:
 
         document_record = {
             "document_id": document_id,
-            "sha256": file_hash,
             "filename": pdf_path.name,
-            "relative_path": str(pdf_path.relative_to(input_dir)),
             "page_count": doc.page_count,
             "metadata": metadata,
         }
@@ -105,11 +75,7 @@ def extract_pdf(pdf_path: Path, input_dir: Path) -> tuple[dict, list[dict]]:
             words_raw = page.get_text("words", sort=False)
             words = [extract_word(word) for word in words_raw]
 
-            # Blocks give us a useful higher-level representation of layout.
             blocks_raw = page.get_text("blocks", sort=False)
-
-            # Keep only text blocks for now.
-            blocks = [extract_block(block) for block in blocks_raw if block[6] == 0]
 
             stripped_text = text.strip()
 
@@ -121,7 +87,6 @@ def extract_pdf(pdf_path: Path, input_dir: Path) -> tuple[dict, list[dict]]:
                 extraction_status = "ok"
 
             page_record = {
-                "schema_version": 1,
                 "document_id": document_id,
                 # Internal index is zero-based.
                 "page_index": page_index,
@@ -133,11 +98,10 @@ def extract_pdf(pdf_path: Path, input_dir: Path) -> tuple[dict, list[dict]]:
                 "extraction_status": extraction_status,
                 "text": text,
                 "text_extraction_method": "pymypdf_native",
-                "blocks": blocks,
                 "words": words,
                 "character_count": len(text),
                 "word_count": len(words),
-                "block_count": len(blocks),
+                "block_count": sum(block[6] == 0 for block in blocks_raw),
             }
 
             pages.append(page_record)
@@ -146,5 +110,4 @@ def extract_pdf(pdf_path: Path, input_dir: Path) -> tuple[dict, list[dict]]:
 
     finally:
         doc.close()
-
 

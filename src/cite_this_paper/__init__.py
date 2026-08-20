@@ -2,7 +2,7 @@
 
 from .corpus import Corpus, CorpusError, DuplicateDocumentError
 from .cleanup import CleanupResult, cleanup_corpora, find_inactive_corpora
-from .ingest import ingest_pdf, ingest_directory
+from .ingest import ingest_pdf
 from .indexing import rebuild_index
 from .retrieval import verify_claim
 
@@ -14,7 +14,6 @@ __all__ = [
     "cleanup_corpora",
     "find_inactive_corpora",
     "ingest_pdf",
-    "ingest_directory",
     "rebuild_index",
     "verify_claim",
 ]

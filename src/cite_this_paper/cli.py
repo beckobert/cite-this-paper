@@ -11,7 +11,7 @@ from pathlib import Path
 from .cleanup import CleanupResult, cleanup_corpora, find_inactive_corpora
 from .corpus import Corpus, CorpusError, DuplicateDocumentError
 from .indexing import rebuild_index
-from .ingest import IngestResult, ingest_directory, ingest_pdf
+from .ingest import IngestResult, ingest_pdf
 from .progress import ConsoleReporter, ProgressReporter
 from .retrieval import verify_claim
 from .review import render_sentences

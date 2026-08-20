@@ -6,7 +6,7 @@ import hashlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, Literal
+from typing import Any, Literal
 
 from .processing.classification import classify_document
 from .processing.passages import build_passages_for_block, group_sentences
@@ -155,7 +155,7 @@ def ingest_pdf(
         return _replace_duplicate(corpus, source, sha256, existing, metadata_overrides)
 
     try:
-        extracted_document, pages = extract_pdf(source, source.parent)
+        extracted_document, pages = extract_pdf(source)
         sentences = _build_sentences(pages, debug=debug)
         config = corpus.config()
         passages = _build_passages(
@@ -163,7 +163,7 @@ def ingest_pdf(
             int(config["passage_max_words"]),
             int(config["passage_overlap_sentences"]),
         )
-        classified, report = classify_document(
+        classified = classify_document(
             passages=passages,
             sentences={sentence["sentence_id"]: sentence for sentence in sentences},
             document=extracted_document,
@@ -220,21 +220,20 @@ def ingest_pdf(
                     INSERT INTO sentences (
                         document_id, page_id, display_id, page_sentence_index,
                         document_sentence_index, logical_block_index, primary_block_no,
-                        source_text, normalized_text, character_count, source_word_count,
-                        source_word_start, source_word_end
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        source_text, normalized_text, character_count, source_word_count
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         document_id, page_ids[sentence["page_index"]], sentence["sentence_id"],
                         sentence["page_sentence_index"], sentence["document_sentence_index"],
-                        sentence.get("logical_block_index", sentence["block_no"]), sentence["block_no"],
+                        sentence["logical_block_index"], sentence["primary_block_no"],
                         sentence["text"], sentence["text_normalized"], sentence["character_count"],
-                        sentence["source_word_count"], sentence.get("source_word_start"), sentence.get("source_word_end"),
+                        sentence["source_word_count"],
                     ),
                 )
                 sentence_id = int(sentence_cursor.lastrowid)
                 sentence_ids[sentence["sentence_id"]] = sentence_id
-                for position, box in enumerate(sentence.get("boxes", [])):
+                for position, box in enumerate(sentence["boxes"]):
                     x0, y0, x1, y1 = box["bbox"]
                     connection.execute(
                         """
@@ -244,23 +243,21 @@ def ingest_pdf(
                         (sentence_id, position, box["block_no"], box["line_no"], x0, y0, x1, y1),
                     )
 
-            classification_json = json.dumps(report.get("cutoff"), ensure_ascii=False) if report.get("cutoff") else None
             for passage in classified:
                 passage_cursor = connection.execute(
                     """
                     INSERT INTO passages (
                         document_id, page_id, display_id, logical_block_index, block_passage_index,
                         source_text, normalized_text, word_count, sentence_count,
-                        retrieval_eligible_base, retrieval_eligible, content_type, classification_json
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        retrieval_eligible, content_type
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         document_id, page_ids[passage["page_index"]], passage["passage_id"],
-                        passage.get("logical_block_index", passage["physical_block_nos"][0]),
+                        passage["logical_block_index"],
                         passage["block_passage_index"], passage["text"], passage["text_normalized"],
                         passage["word_count"], passage["sentence_count"],
-                        int(bool(passage.get("retrieval_eligible_base", passage["retrieval_eligible"]))),
-                        int(bool(passage["retrieval_eligible"])), passage["content_type"], classification_json,
+                        int(bool(passage["retrieval_eligible"])), passage["content_type"],
                     ),
                 )
                 passage_id = int(passage_cursor.lastrowid)
@@ -276,28 +273,3 @@ def ingest_pdf(
 
     corpus.mark_rebuild_required()
     return IngestResult(source, "added", document_id)
-
-
-def ingest_directory(
-    corpus: Corpus,
-    directory: Path,
-    *,
-    on_duplicate: DuplicatePolicy = "ask",
-    metadata_overrides: dict[str, Any] | None = None,
-    reporter: ProgressReporter | None = None,
-    debug: bool = False,
-) -> list[IngestResult]:
-    """Ingest every PDF below a directory in stable path order."""
-    directory = directory.expanduser().resolve()
-    paths = sorted(directory.rglob("*.pdf"))
-    return [
-        ingest_pdf(
-            corpus,
-            path,
-            on_duplicate=on_duplicate,
-            metadata_overrides=metadata_overrides,
-            reporter=reporter,
-            debug=debug,
-        )
-        for path in paths
-    ]

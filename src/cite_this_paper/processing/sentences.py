@@ -1,15 +1,7 @@
-#!/usr/bin/env python3
-
-import argparse
-import json
 import re
 from collections import OrderedDict
-from pathlib import Path
 
 import spacy
-
-SENTENCE_BUILDER_VERSION = 3
-
 
 # Common abbreviations in scientific writing where a simple rule-based
 # sentence splitter may otherwise occasionally create a false boundary.
@@ -703,30 +695,18 @@ def build_sentences_for_page(
             )
 
             sentence_record = {
-                "schema_version": 3,
-                "sentence_builder_version": SENTENCE_BUILDER_VERSION,
                 "sentence_id": sentence_id,
                 "document_id": page["document_id"],
                 "page_index": page["page_index"],
                 "page_number": page["page_number"],
                 "page_sentence_index": page_sentence_index,
                 "document_sentence_index": document_sentence_index,
-                # Logical block used for retrieval grouping.
-                #
-                # For backwards compatibility, block_no is the
-                # first physical block in the logical group.
-                "block_no": block_numbers[0],
+                "primary_block_no": block_numbers[0],
                 "logical_block_index": logical_block_index,
-                # Exact PyMuPDF blocks contributing words to
-                # this sentence.
-                "block_nos": block_numbers,
                 "text": source_text,
                 "text_normalized": normalized_text,
                 "character_count": len(source_text),
                 "source_word_count": len(source_word_indices),
-                "source_word_indices": source_word_indices,
-                "source_word_start": min(source_word_indices),
-                "source_word_end": max(source_word_indices) + 1,
                 "boxes": line_boxes,
             }
 
@@ -736,4 +716,3 @@ def build_sentences_for_page(
             document_sentence_index += 1
 
     return sentences, document_sentence_index
-

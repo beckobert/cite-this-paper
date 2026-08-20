@@ -116,8 +116,3 @@ def render_sentences(
             document.close()
 
     return rendered_pages
-
-
-def render_sentence(corpus: Corpus, display_id: str, output_directory: Path, dpi: int = 150) -> Path:
-    """Compatibility wrapper for rendering one highlighted source sentence."""
-    return render_sentences(corpus, [display_id], output_directory, dpi)[0].output_path

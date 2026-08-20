@@ -1,16 +1,8 @@
-#!/usr/bin/env python3
-
-import argparse
-import json
 import re
-from collections import defaultdict
 from pathlib import Path
 from typing import TypedDict
 
 import pymupdf
-
-CLASSIFIER_VERSION = 1
-
 
 class TerminalHeadingMatch(TypedDict):
     section_type: str
@@ -483,48 +475,6 @@ def find_reference_rule_cutoff(
 
 
 # ------------------------------------------------------------
-# Data loading
-# ------------------------------------------------------------
-
-
-def load_jsonl(path: Path) -> list[dict]:
-    records = []
-
-    with path.open(
-        "r",
-        encoding="utf-8",
-    ) as f:
-        for line_number, line in enumerate(
-            f,
-            start=1,
-        ):
-            if not line.strip():
-                continue
-
-            try:
-                records.append(json.loads(line))
-
-            except json.JSONDecodeError as exc:
-                raise RuntimeError(
-                    f"Invalid JSON in {path}, line {line_number}"
-                ) from exc
-
-    return records
-
-
-def load_documents(
-    path: Path,
-) -> dict[str, dict]:
-    return {record["document_id"]: record for record in load_jsonl(path)}
-
-
-def load_sentences(
-    path: Path,
-) -> dict[str, dict]:
-    return {record["sentence_id"]: record for record in load_jsonl(path)}
-
-
-# ------------------------------------------------------------
 # Passage geometry
 # ------------------------------------------------------------
 
@@ -626,7 +576,7 @@ def classify_document(
     sentences: dict[str, dict],
     document: dict,
     pdf_path: Path,
-) -> tuple[list[dict], dict]:
+) -> list[dict]:
     """
     Classify one document's passages.
     """
@@ -647,21 +597,11 @@ def classify_document(
             pdf_path=pdf_path,
         )
 
-    cutoff = heading_cutoff if heading_cutoff is not None else rule_cutoff
-
     classified = []
-    filtered_count = 0
-
     for passage_index, passage in enumerate(passages):
         result = dict(passage)
 
-        # Preserve the old eligibility decision.
-        base_eligible = passage.get(
-            "retrieval_eligible",
-            True,
-        )
-
-        result["retrieval_eligible_base"] = base_eligible
+        retrieval_eligible = passage["retrieval_eligible"]
 
         is_end_matter = False
 
@@ -686,28 +626,16 @@ def classify_document(
 
             result["retrieval_eligible"] = False
 
-            filtered_count += 1
-
         else:
             result["content_type"] = "body"
 
-            result["retrieval_eligible"] = base_eligible
+            result["retrieval_eligible"] = retrieval_eligible
 
         classified.append(result)
 
-    report = {
-        "document_id": document["document_id"],
-        "filename": document["filename"],
-        "passages": len(passages),
-        "filtered_passages": filtered_count,
-        "cutoff": cutoff,
-    }
-
-    return classified, report
+    return classified
 
 
 # ------------------------------------------------------------
 # Main
 # ------------------------------------------------------------
-
-

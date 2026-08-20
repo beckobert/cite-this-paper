@@ -6,7 +6,7 @@ import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 SCHEMA = """
@@ -87,8 +87,6 @@ CREATE TABLE IF NOT EXISTS sentences (
     normalized_text TEXT NOT NULL,
     character_count INTEGER NOT NULL,
     source_word_count INTEGER NOT NULL,
-    source_word_start INTEGER,
-    source_word_end INTEGER,
     UNIQUE(page_id, page_sentence_index)
 );
 
@@ -117,10 +115,8 @@ CREATE TABLE IF NOT EXISTS passages (
     normalized_text TEXT NOT NULL,
     word_count INTEGER NOT NULL,
     sentence_count INTEGER NOT NULL,
-    retrieval_eligible_base INTEGER NOT NULL CHECK (retrieval_eligible_base IN (0, 1)),
     retrieval_eligible INTEGER NOT NULL CHECK (retrieval_eligible IN (0, 1)),
     content_type TEXT NOT NULL CHECK (content_type IN ('body', 'end_matter')),
-    classification_json TEXT,
     embedding_row INTEGER UNIQUE,
     UNIQUE(document_id, page_id, logical_block_index, block_passage_index)
 );
