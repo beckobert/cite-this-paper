@@ -96,6 +96,15 @@ class Corpus:
         with self.connect() as connection:
             return dict(connection.execute("SELECT * FROM corpus_state WHERE id = 1").fetchone())
 
+    def touch_access(self) -> None:
+        """Record use by a normal package command for retention cleanup."""
+        with self.connect() as connection:
+            connection.execute(
+                "UPDATE corpus_state SET last_accessed_at = ? WHERE id = 1",
+                (utc_now(),),
+            )
+            connection.commit()
+
     def store_pdf(self, source: Path, sha256: str, *, replace: bool) -> Path:
         suffix = source.suffix.lower() or ".pdf"
         target = self.pdfs_path / f"{sha256}{suffix}"

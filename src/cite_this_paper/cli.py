@@ -8,6 +8,7 @@ import sys
 import textwrap
 from pathlib import Path
 
+from .cleanup import CleanupResult, cleanup_corpora, find_inactive_corpora
 from .corpus import Corpus, CorpusError, DuplicateDocumentError
 from .indexing import rebuild_index
 from .ingest import IngestResult, ingest_directory, ingest_pdf
@@ -21,6 +22,62 @@ RESPONSIBILITY_NOTICE = (
     "responsible for verifying it and deciding how to use or further process "
     "the result."
 )
+
+
+def _format_size(size_bytes: int) -> str:
+    value = float(size_bytes)
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if value < 1024 or unit == "TiB":
+            return f"{value:.1f} {unit}" if unit != "B" else f"{int(value)} {unit}"
+        value /= 1024
+    raise AssertionError("Unreachable")
+
+
+def _print_cleanup_report(results: list[CleanupResult], *, mode: str, apply: bool) -> None:
+    title = "DATABASE CLEANUP REPORT" if apply else "DATABASE CLEANUP PREVIEW"
+    print()
+    print("=" * 88)
+    print(title)
+    print("=" * 88)
+    print(f"Mode: {mode}")
+    if not results:
+        print("No corpus databases matched this cleanup request.")
+    else:
+        print(f"{'STATUS':<10} {'SIZE':>10}  {'LAST ACCESSED':<25} DATABASE")
+        print("-" * 88)
+        for result in results:
+            accessed = result.last_accessed_at or "not tracked"
+            print(f"{result.status.upper():<10} {_format_size(result.size_bytes):>10}  {accessed:<25} {result.root}")
+            if result.message:
+                print(f"           {result.message}")
+    print("=" * 88)
+    if not apply:
+        print("No data was removed. Re-run this command with --apply to permanently delete the listed databases.")
+
+
+def _cleanup_command(args: argparse.Namespace) -> int:
+    explicit = bool(args.databases)
+    age_based = args.unused_for is not None
+    if explicit == age_based:
+        raise CorpusError("Specify database paths or --unused-for DAYS, but not both.")
+    if age_based:
+        try:
+            discovered = find_inactive_corpora(args.root, args.unused_for)
+        except ValueError as error:
+            raise CorpusError(str(error)) from error
+        candidates = [result.root for result in discovered if result.status == "ready"]
+        outcomes = cleanup_corpora(candidates, apply=args.apply, protected_root=args.root)
+        results = [result for result in discovered if result.status != "ready"] + outcomes
+        results.sort(key=lambda result: str(result.root))
+        _print_cleanup_report(
+            results,
+            mode=f"inactive for at least {args.unused_for} day(s) below {args.root.expanduser().resolve()}",
+            apply=args.apply,
+        )
+    else:
+        results = cleanup_corpora(args.databases, apply=args.apply)
+        _print_cleanup_report(results, mode="explicit database paths", apply=args.apply)
+    return 2 if any(result.status == "invalid" for result in results) else 0
 
 
 def _metadata_from_args(args: argparse.Namespace) -> dict:
@@ -342,6 +399,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="In non-interactive use, verify with the previous index when documents await rebuilding.",
     )
 
+    cleanup = commands.add_parser("cleanup-databases", help="Preview or permanently remove corpus databases.")
+    cleanup.add_argument("databases", nargs="*", type=Path, metavar="DATABASE")
+    cleanup.add_argument("--unused-for", type=int, metavar="DAYS", help="Select databases not accessed for this many days.")
+    cleanup.add_argument("--root", type=Path, default=Path("data/corpora"), help="Parent directory scanned with --unused-for.")
+    cleanup.add_argument("--apply", action="store_true", help="Permanently delete selected databases instead of previewing them.")
+
     show = commands.add_parser(
         "show-sentences",
         help="Render highlighted source sentences, grouped into one image per PDF page.",
@@ -360,8 +423,11 @@ def main(argv: list[str] | None = None) -> int:
             Corpus.create(args.database)
             print(f"Created corpus: {args.database.resolve()}")
             return 0
+        if args.command == "cleanup-databases":
+            return _cleanup_command(args)
         corpus = Corpus.open(args.database)
-        reporter = ConsoleReporter(quiet=args.quiet)
+        corpus.touch_access()
+        reporter = ConsoleReporter(quiet=getattr(args, "quiet", False))
         if args.command == "add-pdf":
             result = _ingest_one(corpus, args.source, args, reporter)
             index_status = _maybe_rebuild(corpus, args, result.status == "added", reporter)

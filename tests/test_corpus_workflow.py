@@ -169,6 +169,87 @@ class CorpusWorkflowTests(unittest.TestCase):
             self.assertGreater(connection.execute("SELECT count(*) FROM sentence_boxes").fetchone()[0], 0)
             self.assertGreater(connection.execute("SELECT count(*) FROM passages").fetchone()[0], 0)
 
+    def test_cleanup_preview_and_applied_explicit_deletion(self):
+        target = Corpus.create(self.root / "remove-me")
+        preview = StringIO()
+        with redirect_stdout(preview):
+            exit_code = cli.main(["cleanup-databases", str(target.root)])
+        self.assertEqual(exit_code, 0)
+        self.assertTrue(target.root.exists())
+        self.assertIn("DATABASE CLEANUP PREVIEW", preview.getvalue())
+        self.assertIn("PREVIEW", preview.getvalue())
+
+        applied = StringIO()
+        with redirect_stdout(applied):
+            exit_code = cli.main(["cleanup-databases", str(target.root), "--apply"])
+        self.assertEqual(exit_code, 0)
+        self.assertFalse(target.root.exists())
+        self.assertIn("DATABASE CLEANUP REPORT", applied.getvalue())
+        self.assertIn("DELETED", applied.getvalue())
+
+    def test_cleanup_refuses_to_delete_valid_target_when_request_has_invalid_target(self):
+        target = Corpus.create(self.root / "keep-me")
+        output = StringIO()
+        with redirect_stdout(output):
+            exit_code = cli.main([
+                "cleanup-databases", str(target.root), str(self.root / "not-a-corpus"), "--apply"
+            ])
+        self.assertEqual(exit_code, 2)
+        self.assertTrue(target.root.exists())
+        self.assertIn("INVALID", output.getvalue())
+
+    def test_age_based_cleanup_uses_last_accessed_timestamp(self):
+        old = Corpus.create(self.root / "old")
+        recent = Corpus.create(self.root / "recent")
+        with old.connect() as connection:
+            connection.execute("UPDATE corpus_state SET last_accessed_at = '2000-01-01T00:00:00+00:00' WHERE id = 1")
+            connection.commit()
+
+        output = StringIO()
+        with redirect_stdout(output):
+            exit_code = cli.main([
+                "cleanup-databases", "--unused-for", "30", "--root", str(self.root)
+            ])
+        self.assertEqual(exit_code, 0)
+        self.assertTrue(old.root.exists())
+        self.assertTrue(recent.root.exists())
+        self.assertIn(str(old.root), output.getvalue())
+        self.assertNotIn(str(recent.root), output.getvalue())
+
+        with redirect_stdout(StringIO()):
+            exit_code = cli.main([
+                "cleanup-databases", "--unused-for", "30", "--root", str(self.root), "--apply"
+            ])
+        self.assertEqual(exit_code, 0)
+        self.assertFalse(old.root.exists())
+        self.assertTrue(recent.root.exists())
+
+    def test_age_based_cleanup_never_deletes_the_scan_root(self):
+        scan_root = self.root / "scan-root"
+        corpus = Corpus.create(scan_root)
+        with corpus.connect() as connection:
+            connection.execute("UPDATE corpus_state SET last_accessed_at = '2000-01-01T00:00:00+00:00' WHERE id = 1")
+            connection.commit()
+        output = StringIO()
+        with redirect_stdout(output):
+            exit_code = cli.main([
+                "cleanup-databases", "--unused-for", "30", "--root", str(scan_root), "--apply"
+            ])
+        self.assertEqual(exit_code, 2)
+        self.assertTrue(scan_root.exists())
+        self.assertIn("cleanup root itself", output.getvalue())
+
+    def test_normal_cli_command_refreshes_last_accessed_timestamp(self):
+        with self.corpus.connect() as connection:
+            connection.execute("UPDATE corpus_state SET last_accessed_at = '2000-01-01T00:00:00+00:00' WHERE id = 1")
+            connection.commit()
+        with patch("cite_this_paper.cli.render_sentences", return_value=[]), redirect_stdout(StringIO()):
+            self.assertEqual(
+                cli.main(["show-sentences", "--database", str(self.corpus.root), "sentence-id"]),
+                0,
+            )
+        self.assertNotEqual(self.corpus.state()["last_accessed_at"], "2000-01-01T00:00:00+00:00")
+
     def test_rebuild_and_verified_claim_are_audited(self):
         ingest_pdf(self.corpus, self.pdf, on_duplicate="discard")
         result = rebuild_index(self.corpus, FakeEmbeddingModel())

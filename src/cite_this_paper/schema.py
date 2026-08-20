@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import sqlite3
+from datetime import UTC, datetime
 from pathlib import Path
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 SCHEMA = """
@@ -18,7 +19,8 @@ CREATE TABLE IF NOT EXISTS corpus_state (
     embedding_model TEXT,
     embedding_config_json TEXT NOT NULL DEFAULT '{}',
     indexed_passage_count INTEGER NOT NULL DEFAULT 0,
-    last_indexed_at TEXT
+    last_indexed_at TEXT,
+    last_accessed_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS documents (
@@ -201,11 +203,11 @@ def initialize(database_path: Path) -> None:
         connection.executescript(SCHEMA)
         connection.execute(
             """
-            INSERT INTO corpus_state (id, schema_version, index_status)
-            VALUES (1, ?, 'empty')
+            INSERT INTO corpus_state (id, schema_version, index_status, last_accessed_at)
+            VALUES (1, ?, 'empty', ?)
             ON CONFLICT(id) DO NOTHING
             """,
-            (SCHEMA_VERSION,),
+            (SCHEMA_VERSION, datetime.now(UTC).isoformat(timespec="seconds")),
         )
         connection.commit()
     finally:

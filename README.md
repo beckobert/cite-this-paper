@@ -16,6 +16,29 @@ cite-this-paper rebuild-index --database data/corpora/water
 cite-this-paper verify-claim --database data/corpora/water "Your scientific claim"
 ```
 
+## Removing corpora
+
+Corpus deletion is permanent. Preview explicitly selected databases before
+deleting them:
+
+```bash
+cite-this-paper cleanup-databases data/corpora/old-project
+cite-this-paper cleanup-databases data/corpora/old-project --apply
+```
+
+To find inactive databases, scan `data/corpora` (or choose another parent with
+`--root`) and supply the inactivity threshold in days:
+
+```bash
+cite-this-paper cleanup-databases --unused-for 90
+cite-this-paper cleanup-databases --unused-for 90 --root data/corpora --apply
+```
+
+The package refreshes a corpus’s last-access timestamp whenever a normal corpus
+command runs. This development schema has no migration path: recreate older
+corpora before selecting them with `--unused-for`; they can still be removed by
+an explicit path.
+
 The standard verification workflow always performs dense and lexical
 retrieval, hybrid rank fusion, Qwen passage reranking, and local Qwen evidence
 verification. The default model stages expect CUDA; pass `--device cpu` to
