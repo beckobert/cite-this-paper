@@ -22,10 +22,11 @@ verification. The default model stages expect CUDA; pass `--device cpu` to
 `verify-claim` when the selected models support CPU execution.
 
 `verify-claim` prints each verdict with its source metadata, verifier reason,
-and the evidence sentences selected by the verifier. Every displayed sentence
-includes a copy-pasteable `show-sentence` command that renders its original PDF
-location. If the verifier selects no individual sentence, the command clearly
-labels and displays every sentence in the passage as passage-wide evidence.
+and the evidence sentences selected by the verifier. Every result includes one
+copy-pasteable `show-sentences` command for all displayed evidence; it renders
+one combined highlighted image for each affected PDF page. If the verifier
+selects no individual sentence, the command clearly labels and displays every
+sentence in the passage as passage-wide evidence.
 Pass `--verbose` to include dense, lexical, fusion, and reranker diagnostics.
 
 Each corpus contains `corpus.sqlite`, managed PDF copies, and one current

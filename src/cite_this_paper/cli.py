@@ -12,7 +12,7 @@ from .corpus import Corpus, CorpusError, DuplicateDocumentError
 from .indexing import rebuild_index
 from .ingest import IngestResult, ingest_directory, ingest_pdf
 from .retrieval import verify_claim
-from .review import render_sentence, sentence_details
+from .review import render_sentences
 
 
 RESPONSIBILITY_NOTICE = (
@@ -106,19 +106,19 @@ def _passage_sentence_records(corpus: Corpus, passage_id: int) -> list[dict]:
     return [dict(row) for row in rows]
 
 
-def _format_render_command(corpus: Corpus, sentence_id: str) -> str:
+def _format_render_command(corpus: Corpus, sentence_ids: list[str]) -> str:
     return shlex.join(
         [
             "cite-this-paper",
-            "show-sentence",
+            "show-sentences",
             "--database",
             str(corpus.root),
-            sentence_id,
+            *sentence_ids,
         ]
     )
 
 
-def _print_sentence_evidence(corpus: Corpus, sentence: dict) -> None:
+def _print_sentence_evidence(sentence: dict) -> None:
     print(f"  Sentence: {sentence['display_id']}")
     print("  Text:")
     print(
@@ -129,7 +129,6 @@ def _print_sentence_evidence(corpus: Corpus, sentence: dict) -> None:
             subsequent_indent="    ",
         )
     )
-    print(f"  Show: {_format_render_command(corpus, sentence['display_id'])}")
 
 
 def _format_rank_score(label: str, rank: int | None, score: float | None, score_name: str) -> str:
@@ -194,7 +193,16 @@ def _print_verification_output(
         if evidence:
             for sentence in evidence:
                 print()
-                _print_sentence_evidence(corpus, sentence)
+                _print_sentence_evidence(sentence)
+            print()
+            print("Show all displayed evidence:")
+            print(
+                "  "
+                + _format_render_command(
+                    corpus,
+                    [sentence["display_id"] for sentence in evidence],
+                )
+            )
         else:
             print("  No stored sentences are available for this passage.")
 
@@ -276,9 +284,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="In non-interactive use, verify with the previous index when documents await rebuilding.",
     )
 
-    show = commands.add_parser("show-sentence", help="Render a highlighted source sentence.")
+    show = commands.add_parser(
+        "show-sentences",
+        help="Render highlighted source sentences, grouped into one image per PDF page.",
+    )
     show.add_argument("--database", required=True, type=Path)
-    show.add_argument("sentence_id")
+    show.add_argument("sentence_ids", nargs="+", help="One or more sentence IDs to highlight")
     show.add_argument("--output-dir", type=Path)
     show.add_argument("--dpi", type=int, default=150)
     return parser
@@ -325,11 +336,18 @@ def main(argv: list[str] | None = None) -> int:
                 verbose=args.verbose,
             )
             return 0
-        if args.command == "show-sentence":
-            detail = sentence_details(corpus, args.sentence_id)
-            output = render_sentence(corpus, args.sentence_id, args.output_dir or corpus.root / "review", args.dpi)
-            print(detail["source_text"])
-            print(f"Rendered page: {output}")
+        if args.command == "show-sentences":
+            rendered_pages = render_sentences(
+                corpus,
+                args.sentence_ids,
+                args.output_dir or corpus.root / "review",
+                args.dpi,
+            )
+            print(f"Rendered {len(args.sentence_ids)} sentence(s) across {len(rendered_pages)} page(s):")
+            for rendered_page in rendered_pages:
+                print(f"{rendered_page.filename} — page {rendered_page.page_number}")
+                print("  Sentences: " + ", ".join(rendered_page.sentence_ids))
+                print(f"  Rendered page: {rendered_page.output_path}")
             return 0
     except CorpusError as error:
         print(f"ERROR: {error}", file=sys.stderr)

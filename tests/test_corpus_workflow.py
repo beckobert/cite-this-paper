@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import sqlite3
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
@@ -12,11 +11,12 @@ from unittest.mock import patch
 import numpy as np
 import pymupdf
 
-from cite_this_paper.corpus import Corpus
+from cite_this_paper.corpus import Corpus, CorpusError
 from cite_this_paper import cli
 from cite_this_paper.indexing import IndexResult, rebuild_index
 from cite_this_paper.ingest import ingest_pdf
 from cite_this_paper.models import VerificationOutput
+from cite_this_paper.review import render_sentences
 from cite_this_paper.retrieval import verify_claim
 
 
@@ -52,6 +52,15 @@ def create_pdf(path: Path, text: str) -> None:
     document = pymupdf.open()
     page = document.new_page()
     page.insert_text((72, 72), text)
+    document.save(path)
+    document.close()
+
+
+def create_two_page_pdf(path: Path, page_texts: list[str]) -> None:
+    document = pymupdf.open()
+    for text in page_texts:
+        page = document.new_page()
+        page.insert_text((72, 72), text)
     document.save(path)
     document.close()
 
@@ -144,7 +153,8 @@ class CorpusWorkflowTests(unittest.TestCase):
         self.assertIn("CLAIM VERIFICATION", text)
         self.assertIn("Verifier-selected evidence:", text)
         self.assertIn(sentence_id, text)
-        self.assertIn(f"show-sentence --database {self.corpus.root} {sentence_id}", text)
+        self.assertIn(f"show-sentences --database {self.corpus.root} {sentence_id}", text)
+        self.assertEqual(text.count("show-sentences --database"), 1)
         self.assertIn(cli.RESPONSIBILITY_NOTICE, text)
         self.assertTrue(text.rstrip().endswith(cli.RESPONSIBILITY_NOTICE))
         self.assertNotIn("Retrieval diagnostics:", text)
@@ -191,7 +201,41 @@ class CorpusWorkflowTests(unittest.TestCase):
         self.assertGreaterEqual(len(sentence_ids), 2)
         for sentence_id in sentence_ids:
             self.assertIn(sentence_id, text)
-            self.assertIn(f"show-sentence --database {self.corpus.root} {sentence_id}", text)
+        command = f"show-sentences --database {self.corpus.root} {' '.join(sentence_ids)}"
+        self.assertIn(command, text)
+        self.assertEqual(text.count("show-sentences --database"), 1)
+
+    def test_show_sentences_renders_one_image_per_affected_page(self):
+        multi_page_pdf = self.root / "multi-page.pdf"
+        create_two_page_pdf(
+            multi_page_pdf,
+            [
+                "The first page contains enough scientific words for evidence retrieval.",
+                "The second page contains enough scientific words for evidence retrieval.",
+            ],
+        )
+        ingest_pdf(self.corpus, multi_page_pdf, on_duplicate="discard")
+        with self.corpus.connect() as connection:
+            sentence_ids = [
+                row[0]
+                for row in connection.execute(
+                    "SELECT display_id FROM sentences ORDER BY document_sentence_index"
+                )
+            ]
+        output_directory = self.root / "rendered"
+        rendered_pages = render_sentences(self.corpus, sentence_ids, output_directory)
+        self.assertEqual(len(rendered_pages), 2)
+        self.assertTrue(all(rendered_page.output_path.exists() for rendered_page in rendered_pages))
+        self.assertEqual(
+            {sentence_id for rendered_page in rendered_pages for sentence_id in rendered_page.sentence_ids},
+            set(sentence_ids),
+        )
+
+    def test_show_sentences_validates_all_ids_before_creating_output(self):
+        output_directory = self.root / "invalid-rendered"
+        with self.assertRaises(CorpusError):
+            render_sentences(self.corpus, ["missing-sentence-id"], output_directory)
+        self.assertFalse(output_directory.exists())
 
     def test_stale_index_requires_explicit_noninteractive_override(self):
         ingest_pdf(self.corpus, self.pdf, on_duplicate="discard")
