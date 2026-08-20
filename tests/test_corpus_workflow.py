@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
@@ -15,7 +16,13 @@ from cite_this_paper.corpus import Corpus, CorpusError
 from cite_this_paper import cli
 from cite_this_paper.indexing import IndexResult, rebuild_index
 from cite_this_paper.ingest import ingest_pdf
-from cite_this_paper.models import VerificationOutput
+from cite_this_paper.models import (
+    VERDICT_LABELS,
+    VERIFIER_PROMPT,
+    VERIFIER_PROMPT_VERSION,
+    VerificationOutput,
+    parse_verification_output,
+)
 from cite_this_paper.review import render_sentences
 from cite_this_paper.retrieval import verify_claim
 
@@ -46,6 +53,20 @@ class NoEvidenceVerifier:
 
     def verify(self, claim, numbered_sentences):
         return VerificationOutput("RELATED_ONLY", [], "No individual sentence was selected")
+
+
+class NotMentionedVerifier:
+    name = "test-not-mentioned-verifier"
+
+    def verify(self, claim, numbered_sentences):
+        return VerificationOutput("NOT_MENTIONED", [], "The passage is unrelated to the claim")
+
+
+class NoTagContradictionVerifier:
+    name = "test-no-tag-contradiction-verifier"
+
+    def verify(self, claim, numbered_sentences):
+        return VerificationOutput("CONTRADICTS", [], "Test contradiction without sentence tags")
 
 
 def create_pdf(path: Path, text: str) -> None:
@@ -106,6 +127,28 @@ class CorpusWorkflowTests(unittest.TestCase):
         with self.corpus.connect() as connection:
             self.assertEqual(connection.execute("SELECT status FROM verification_runs WHERE id = ?", (run_id,)).fetchone()[0], "completed")
             self.assertGreater(connection.execute("SELECT count(*) FROM verification_evidence").fetchone()[0], 0)
+            config = json.loads(
+                connection.execute(
+                    "SELECT configuration_json FROM verification_runs WHERE id = ?", (run_id,)
+                ).fetchone()[0]
+            )
+        self.assertEqual(config["verifier_prompt_version"], VERIFIER_PROMPT_VERSION)
+
+    def test_verifier_label_contract_and_prompt_distinguish_unrelated_content(self):
+        self.assertIn("NOT_MENTIONED", VERDICT_LABELS)
+        self.assertNotIn("REFERENCES", VERDICT_LABELS)
+        self.assertIn("NEVER a contradiction", VERIFIER_PROMPT)
+        self.assertIn("NOT_MENTIONED", VERIFIER_PROMPT)
+        accepted = parse_verification_output(
+            '{"label": "NOT_MENTIONED", "evidence": [], "reason": "Unrelated."}'
+        )
+        rejected = parse_verification_output(
+            '{"label": "REFERENCES", "evidence": [], "reason": "Legacy label."}'
+        )
+        self.assertEqual(accepted.label, "NOT_MENTIONED")
+        self.assertTrue(accepted.parse_success)
+        self.assertEqual(rejected.label, "VERIFICATION_ERROR")
+        self.assertFalse(rejected.parse_success)
 
     def test_pending_documents_warn_after_a_previous_rebuild(self):
         ingest_pdf(self.corpus, self.pdf, on_duplicate="discard")
@@ -204,6 +247,40 @@ class CorpusWorkflowTests(unittest.TestCase):
         command = f"show-sentences --database {self.corpus.root} {' '.join(sentence_ids)}"
         self.assertIn(command, text)
         self.assertEqual(text.count("show-sentences --database"), 1)
+
+    def test_not_mentioned_and_untagged_contradiction_keep_whole_passage_visible(self):
+        ingest_pdf(self.corpus, self.pdf, on_duplicate="discard")
+        rebuild_index(self.corpus, FakeEmbeddingModel())
+        for verifier, expected_label in (
+            (NotMentionedVerifier(), "NOT_MENTIONED"),
+            (NoTagContradictionVerifier(), "CONTRADICTS"),
+        ):
+            run_id, warning, verified = verify_claim(
+                self.corpus,
+                "An unrelated claim.",
+                embedding_model=FakeEmbeddingModel(),
+                reranker=FakeReranker(),
+                verifier=verifier,
+                candidate_k=10,
+                rerank_k=5,
+                verify_k=1,
+            )
+            output = StringIO()
+            with redirect_stdout(output):
+                cli._print_verification_output(
+                    self.corpus,
+                    "An unrelated claim.",
+                    run_id,
+                    warning,
+                    verified,
+                    verbose=False,
+                )
+            text = output.getvalue()
+            self.assertEqual(verified[0].verification.label, expected_label)
+            self.assertIn("Passage-wide evidence", text)
+            self.assertIn("show-sentences --database", text)
+            if expected_label == "NOT_MENTIONED":
+                self.assertIn("this absence is not a contradiction", text)
 
     def test_show_sentences_renders_one_image_per_affected_page(self):
         multi_page_pdf = self.root / "multi-page.pdf"

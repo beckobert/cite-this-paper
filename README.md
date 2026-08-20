@@ -21,6 +21,12 @@ retrieval, hybrid rank fusion, Qwen passage reranking, and local Qwen evidence
 verification. The default model stages expect CUDA; pass `--device cpu` to
 `verify-claim` when the selected models support CPU execution.
 
+The verifier distinguishes `NOT_MENTIONED` from `RELATED_ONLY`: the former
+means the passage is unrelated to the claim, while the latter means it is
+topically related or merely references relevant work without supporting or
+contradicting the claim. A lack of supporting information is never treated as
+`CONTRADICTS`; contradiction requires explicitly incompatible passage evidence.
+
 `verify-claim` prints each verdict with its source metadata, verifier reason,
 and the evidence sentences selected by the verifier. Every result includes one
 copy-pasteable `show-sentences` command for all displayed evidence; it renders

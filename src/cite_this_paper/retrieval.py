@@ -12,7 +12,14 @@ import numpy as np
 
 from .corpus import Corpus, CorpusError
 from .indexing import BGEEmbeddingModel, EmbeddingModel, normalize_rows, require_matrix
-from .models import ClaimVerifier, PassageReranker, QwenClaimVerifier, QwenPassageReranker, VerificationOutput
+from .models import (
+    VERIFIER_PROMPT_VERSION,
+    ClaimVerifier,
+    PassageReranker,
+    QwenClaimVerifier,
+    QwenPassageReranker,
+    VerificationOutput,
+)
 
 
 @dataclass
@@ -241,7 +248,12 @@ def verify_claim(
         raise CorpusError("This corpus has no index yet. Run rebuild-index first.")
     run_id = _create_run(
         corpus, claim, embedding_model, reranker, verifier, warning,
-        {"candidate_k": candidate_k, "rerank_k": rerank_k, "verify_k": verify_k},
+        {
+            "candidate_k": candidate_k,
+            "rerank_k": rerank_k,
+            "verify_k": verify_k,
+            "verifier_prompt_version": VERIFIER_PROMPT_VERSION,
+        },
     )
     try:
         candidates = hybrid_search(corpus, claim, embedding_model, candidate_k=candidate_k)

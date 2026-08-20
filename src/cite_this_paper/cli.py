@@ -182,6 +182,11 @@ def _print_verification_output(
         if verdict:
             print("Reason:")
             print(textwrap.fill(verdict.reason or "No reason was provided.", width=80, initial_indent="  ", subsequent_indent="  "))
+        if label == "NOT_MENTIONED":
+            print(
+                "Interpretation: The passage does not meaningfully address the claim; "
+                "this absence is not a contradiction."
+            )
 
         evidence = _sentence_records(corpus, candidate.evidence_sentence_ids or [])
         if evidence:
