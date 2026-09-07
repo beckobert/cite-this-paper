@@ -1,9 +1,11 @@
 # cite-this-paper
 
-`cite-this-paper` is a local package for checking scientific claims against a
-curated collection of academic PDFs. It extracts and indexes the source
-documents, retrieves relevant passages, reranks them, and asks a local verifier
-model to classify their relationship to a claim.
+`cite-this-paper` is a local retrieval-augmented generation (RAG) package for
+checking scientific claims against a curated collection of academic PDFs. It
+extracts and indexes the source documents, retrieves and reranks relevant
+passages, then uses locally executed natural-language models to classify their
+relationship to a claim. No hosted language-model service is required for the
+standard workflow.
 
 The package is designed to keep results traceable to their original PDFs. Its
 output is advisory: model verdicts can be wrong, incomplete, or misleading.
@@ -35,7 +37,7 @@ Internally, the package has five stages:
 3. Index rebuilding creates dense BGE-M3 embeddings and a SQLite FTS lexical
    index.
 4. Claim verification combines dense and lexical retrieval, Qwen reranking,
-   and local Qwen passage verification.
+   and locally executed Qwen passage verification.
 5. Source review renders the selected evidence sentences directly on their PDF
    pages.
 
@@ -62,8 +64,8 @@ Verification always follows the same sequence:
 
 1. Create an embedding for the claim and retrieve dense and lexical candidates.
 2. Fuse both result lists into a shared candidate ranking.
-3. Rerank the best candidates with the Qwen reranker.
-4. Verify the highest-ranked passages with the Qwen verifier.
+3. Rerank the best candidates with a locally executed Qwen reranker.
+4. Verify the highest-ranked passages with a locally executed Qwen verifier.
 
 The verifier can return `DIRECT_SUPPORT`, `PARTIAL_SUPPORT`, `CONTRADICTS`,
 `RELATED_ONLY`, or `NOT_MENTIONED`. A passage that omits information is not a

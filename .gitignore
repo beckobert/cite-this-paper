@@ -4,3 +4,4 @@ data/*
 **/__pycache__
 .codex
 .codex-mem
+.env
