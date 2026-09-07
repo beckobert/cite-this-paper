@@ -68,6 +68,11 @@ class NotMentionedVerifier:
         return VerificationOutput("NOT_MENTIONED", [], "The passage is unrelated to the claim")
 
 
+class TtyStringIO(StringIO):
+    def isatty(self):
+        return True
+
+
 class NoTagContradictionVerifier:
     name = "test-no-tag-contradiction-verifier"
 
@@ -675,12 +680,15 @@ class CorpusWorkflowTests(unittest.TestCase):
         shell = CorpusShell(catalog_root, stdout=output)
         shell.onecmd("load healthy")
         shell.onecmd("list")
+        list_text = output.getvalue()
         shell.onecmd("info healthy")
         shell.onecmd("info legacy")
         text = output.getvalue()
         self.assertIn("healthy", text)
         self.assertIn("legacy", text)
         self.assertIn("incompatible", text)
+        self.assertNotIn("Schema 1", list_text)
+        self.assertIn("Schema 1", text)
         self.assertIn("Content: 0 documents", text)
 
         with self.assertRaises(CorpusError):
@@ -724,6 +732,67 @@ class CorpusWorkflowTests(unittest.TestCase):
         self.assertTrue((catalog_root / "keep-me").exists())
         self.assertIn("INVALID", output.getvalue())
 
+    def test_shell_info_for_missing_corpus_is_one_concise_error(self):
+        output = StringIO()
+        shell = CorpusShell(self.root / "catalog", stdout=output)
+        shell.onecmd("info missing")
+        self.assertEqual(output.getvalue(), "ERROR: Corpus 'missing' does not exist.\n")
+
+    def test_shell_help_lists_every_supported_command(self):
+        output = StringIO()
+        shell = CorpusShell(self.root / "catalog", stdout=output)
+        shell.onecmd("help")
+        text = output.getvalue()
+        for command in (
+            "create NAME", "load NAME", "logout", "list", "info [NAME]", "cleanup NAME",
+            "settings", "add-pdf", "add-directory", "rebuild-index", "verify-claim",
+            "show-sentences", "help [COMMAND]", "exit", "quit",
+        ):
+            self.assertIn(command, text)
+        self.assertIn("Create and activate a named corpus.", text)
+
+    def test_shell_settings_control_prompt_and_persist(self):
+        settings_path = self.root / "user-settings.json"
+        output = TtyStringIO()
+        with patch.dict(os.environ, {}, clear=True):
+            shell = CorpusShell(self.root / "catalog", stdout=output, settings_path=settings_path)
+        self.assertIn("\033[1;36m", shell.prompt)
+        self.assertIn("\001\033[1;36m\002", shell.prompt)
+        self.assertIn("\001\033[0m\002", shell.prompt)
+
+        shell.onecmd("settings set prompt.color magenta")
+        shell.onecmd('settings set prompt.marker ">"')
+        shell.onecmd("settings set color.mode never")
+        self.assertEqual(shell.prompt, "cite-this-paper [no corpus] > ")
+        self.assertEqual(json.loads(settings_path.read_text(encoding="utf-8"))["prompt"]["color"], "magenta")
+
+        reloaded = CorpusShell(self.root / "catalog", stdout=TtyStringIO(), settings_path=settings_path)
+        self.assertEqual(reloaded.settings.prompt_color, "magenta")
+        self.assertEqual(reloaded.settings.prompt_marker, ">")
+        self.assertEqual(reloaded.settings.color_mode, "never")
+
+        shell.onecmd("settings reset prompt.color")
+        self.assertEqual(shell.settings.prompt_color, "cyan")
+        shell.onecmd("settings set prompt.color orange")
+        self.assertIn("prompt.color must be one of", output.getvalue())
+
+    def test_shell_settings_fall_back_when_file_is_invalid_and_honor_no_color(self):
+        settings_path = self.root / "invalid-settings.json"
+        settings_path.write_text("{not json", encoding="utf-8")
+        output = TtyStringIO()
+        with patch.dict(os.environ, {"NO_COLOR": "1"}, clear=False):
+            shell = CorpusShell(self.root / "catalog", stdout=output, settings_path=settings_path)
+        self.assertNotIn("\033[", shell.prompt)
+        self.assertIn("Ignoring invalid settings file", output.getvalue())
+
+    def test_shell_settings_fall_back_when_file_is_not_utf8(self):
+        settings_path = self.root / "invalid-settings.json"
+        settings_path.write_bytes(b"\xff\xfe")
+        output = StringIO()
+        shell = CorpusShell(self.root / "catalog", stdout=output, settings_path=settings_path)
+        self.assertEqual(shell.settings.prompt_color, "cyan")
+        self.assertIn("Ignoring invalid settings file", output.getvalue())
+
     def test_session_parser_omits_database_but_direct_parser_keeps_it_required(self):
         session_args = cli.build_parser(session=True).parse_args(["show-sentences", "sentence-id"])
         self.assertFalse(hasattr(session_args, "database"))
@@ -740,3 +809,68 @@ class CorpusWorkflowTests(unittest.TestCase):
             cli._format_render_command(self.corpus, ["sentence-id"]),
             f"cite-this-paper show-sentences --database {self.corpus.root} sentence-id",
         )
+
+    def test_shell_completion_covers_commands_corpora_options_and_settings(self):
+        catalog_root = self.root / "catalog"
+        Corpus.create(catalog_root / "water")
+        Corpus.create(catalog_root / "weather")
+        shell = CorpusShell(catalog_root, stdout=StringIO(), settings_path=self.root / "settings.json")
+
+        self.assertEqual(shell.completenames("ver"), ["verify-claim"])
+        self.assertEqual(shell.complete_load("w", "load w", 5, 6), ["water", "weather"])
+        self.assertEqual(shell.complete_info("wea", "info wea", 5, 8), ["weather"])
+        self.assertEqual(shell.complete_cleanup("wa", "cleanup wa", 8, 10), ["water"])
+        self.assertIn(
+            "--verbose",
+            shell.completedefault("--v", "verify-claim --v", 13, 16),
+        )
+        self.assertEqual(
+            shell.completedefault(
+                "r", "add-pdf source.pdf --on-duplicate r", 34, 35
+            ),
+            ["replace"],
+        )
+        self.assertEqual(
+            shell.completedefault(
+                "--q", "verify-claim a claim --quiet --q", 29, 32
+            ),
+            [],
+        )
+        self.assertEqual(
+            shell.complete_settings("prompt.", "settings set prompt.", 13, 20),
+            ["prompt.color", "prompt.bold", "prompt.marker"],
+        )
+        self.assertEqual(
+            shell.complete_settings("a", "settings set color.mode a", 24, 25),
+            ["auto", "always"],
+        )
+        self.assertEqual(shell.complete_help("show", "help show", 5, 9), ["show-sentences"])
+
+    def test_shell_completion_restores_readline_delimiters(self):
+        try:
+            import readline
+        except ImportError:
+            self.skipTest("readline is unavailable")
+        original = readline.get_completer_delims()
+        shell = CorpusShell(self.root / "catalog", stdout=StringIO(), settings_path=self.root / "settings.json")
+        try:
+            shell.preloop()
+            self.assertNotIn("-", readline.get_completer_delims())
+        finally:
+            shell.postloop()
+        self.assertEqual(readline.get_completer_delims(), original)
+
+    def test_shell_dispatches_hyphenated_operational_commands(self):
+        catalog_root = self.root / "catalog"
+        Corpus.create(catalog_root / "water")
+        shell = CorpusShell(catalog_root, stdout=StringIO(), settings_path=self.root / "settings.json")
+        shell.onecmd("load water")
+
+        with patch("cite_this_paper.cli.execute_operational") as execute:
+            shell.onecmd('verify-claim "a scientific claim" --quiet')
+
+        arguments, keyword_arguments = execute.call_args
+        self.assertEqual(arguments[0].command, "verify-claim")
+        self.assertEqual(arguments[0].claim, "a scientific claim")
+        self.assertTrue(arguments[0].quiet)
+        self.assertTrue(keyword_arguments["interactive"])

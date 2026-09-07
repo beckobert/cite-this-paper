@@ -52,10 +52,10 @@ python -m pip install .
 
 cite-this-paper shell
 
-cite-this-paper> create water
-cite-this-paper[water]> add-directory /path/to/papers --defer-rebuild
-cite-this-paper[water]> rebuild-index
-cite-this-paper[water]> verify-claim "Your scientific claim"
+cite-this-paper [no corpus] ❯ create water
+cite-this-paper [water] ❯ add-directory /path/to/papers --defer-rebuild
+cite-this-paper [water] ❯ rebuild-index
+cite-this-paper [water] ❯ verify-claim "Your scientific claim"
 ```
 
 Named corpora are direct children of `data/corpora` by default. Pass
@@ -63,6 +63,16 @@ Named corpora are direct children of `data/corpora` by default. Pass
 different catalog root. `list` shows the available corpora, `info [NAME]`
 shows counts/index/model/storage details, `load NAME` switches corpora, and
 `logout` clears the active selection without deleting data.
+
+The prompt is bold cyan in an interactive terminal by default. Use `settings`
+inside the shell to view preferences, `settings set KEY VALUE` to change one,
+and `settings reset [KEY]` to restore defaults. Settings are stored in your
+operating system's standard user configuration directory; `NO_COLOR=1` disables
+prompt styling for a session.
+
+Press Tab to complete shell commands, corpus names, command options, and
+supported settings keys or values. Filesystem paths and claim text remain
+free-form.
 
 Use `add-pdf` instead of `add-directory` when adding a single file. New PDFs
 are stored immediately, but do not become searchable until `rebuild-index`

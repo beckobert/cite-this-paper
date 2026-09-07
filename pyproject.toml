@@ -16,6 +16,7 @@ dependencies = [
     "torch>=2.2",
     "transformers>=4.48",
     "tqdm>=4.66",
+    "platformdirs>=4.0",
 ]
 
 [project.scripts]
