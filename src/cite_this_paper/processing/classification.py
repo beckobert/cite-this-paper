@@ -53,34 +53,6 @@ TERMINAL_HEADINGS = {
 }
 
 
-def normalize_heading_text(text: str) -> str:
-    text = text.strip().casefold()
-
-    # Remove common section numbering:
-    #
-    # 6. References
-    # VI. REFERENCES
-    # 5 References
-    text = re.sub(
-        r"^\s*(?:"
-        r"\d+(?:\.\d+)*"
-        r"|[ivxlcdm]+"
-        r")"
-        r"[.)]?\s+",
-        "",
-        text,
-        flags=re.IGNORECASE,
-    )
-
-    text = re.sub(
-        r"\s+",
-        " ",
-        text,
-    )
-
-    return text.strip()
-
-
 def detect_terminal_heading(
     text: str,
 ) -> TerminalHeadingMatch | None:
