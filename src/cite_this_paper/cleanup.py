@@ -41,10 +41,21 @@ def _last_accessed_at(root: Path) -> str | None:
 
 def inspect_corpus(root: Path, *, protected_root: Path | None = None) -> CleanupResult:
     """Validate a corpus directory and collect the information shown to users."""
-    root = root.expanduser().resolve()
+    requested_root = root.expanduser().absolute()
+    if requested_root.is_symlink():
+        return CleanupResult(
+            requested_root,
+            None,
+            0,
+            "invalid",
+            "Symlinked corpus directories cannot be cleaned.",
+        )
+    root = requested_root.resolve()
     if protected_root is not None and root == protected_root.expanduser().resolve():
         return CleanupResult(root, None, 0, "invalid", "The cleanup root itself cannot be deleted.")
     database_path = root / "corpus.sqlite"
+    if database_path.is_symlink():
+        return CleanupResult(root, None, 0, "invalid", "Corpus database files cannot be symlinks.")
     if not root.is_dir() or not database_path.is_file():
         return CleanupResult(root, None, 0, "invalid", "Not a corpus database directory.")
     last_accessed_at = _last_accessed_at(root)

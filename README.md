@@ -165,6 +165,8 @@ Normal corpus commands update the last-access timestamp used by age-based
 cleanup. The schema is intentionally development-oriented and has no migration
 path: recreate corpora after incompatible schema changes. Explicit cleanup can
 still remove an older corpus by path.
+For safety, symlinked corpus directories and database files are not supported
+for catalog loading or cleanup.
 
 Inside the interactive shell, use `cleanup NAME ...` or
 `cleanup --unused-for DAYS` for the selected catalog root. It has the same

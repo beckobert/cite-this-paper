@@ -218,9 +218,7 @@ def _format_render_command(
     *,
     interactive: bool = False,
 ) -> str:
-    command = ["cite-this-paper", "show-sentences"]
-    if not interactive:
-        command.extend(["--database", str(corpus.root)])
+    command = ["show-sentences"] if interactive else ["cite-this-paper", "show-sentences", "--database", str(corpus.root)]
     command.extend(sentence_ids)
     return shlex.join(command)
 

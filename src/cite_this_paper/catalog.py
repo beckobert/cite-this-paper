@@ -65,10 +65,10 @@ def validate_corpus_name(name: str) -> str:
 
 
 def corpus_path(root: Path, name: str) -> Path:
-    """Resolve a named corpus beneath its catalog root."""
+    """Return a named corpus's direct-child path beneath its catalog root."""
     name = validate_corpus_name(name)
     root = root.expanduser().resolve()
-    path = (root / name).resolve()
+    path = root / name
     try:
         path.relative_to(root)
     except ValueError as error:  # Defensive even though names are validated.
@@ -88,6 +88,8 @@ def create_named_corpus(root: Path, name: str) -> Corpus:
 def open_named_corpus(root: Path, name: str) -> Corpus:
     """Open one current-schema named corpus for normal work."""
     path = corpus_path(root, name)
+    if path.is_symlink():
+        raise CorpusError("Symlinked corpus directories cannot be opened from the catalog.")
     return Corpus.open(path)
 
 
@@ -101,14 +103,23 @@ def _matrix_dimensions(path: Path) -> int | None:
     try:
         matrix = np.load(path, mmap_mode="r")
         return int(matrix.shape[1]) if matrix.ndim == 2 and matrix.shape[0] else 0
-    except (OSError, ValueError):
+    except (EOFError, OSError, ValueError):
         return None
 
 
 def inspect_corpus(root: Path, name: str) -> CorpusSummary:
     """Read a corpus summary without requiring schema compatibility."""
     path = corpus_path(root, name)
+    if path.is_symlink():
+        return CorpusSummary(
+            name,
+            path,
+            "invalid",
+            "Symlinked corpus directories are not supported.",
+        )
     database_path = path / "corpus.sqlite"
+    if database_path.is_symlink():
+        return CorpusSummary(name, path, "invalid", "Corpus database files cannot be symlinks.")
     if not path.is_dir() or not database_path.is_file():
         return CorpusSummary(name, path, "invalid", "Not a corpus database directory.")
 

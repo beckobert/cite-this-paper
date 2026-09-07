@@ -242,6 +242,25 @@ class CorpusWorkflowTests(unittest.TestCase):
         self.assertTrue(scan_root.exists())
         self.assertIn("cleanup root itself", output.getvalue())
 
+    def test_cleanup_rejects_symlinked_corpus_targets(self):
+        external = Corpus.create(self.root / "external")
+        with external.connect() as connection:
+            connection.execute("UPDATE corpus_state SET last_accessed_at = '2000-01-01T00:00:00+00:00' WHERE id = 1")
+            connection.commit()
+        catalog_root = self.root / "catalog"
+        catalog_root.mkdir()
+        linked = catalog_root / "linked"
+        linked.symlink_to(external.root, target_is_directory=True)
+
+        output = StringIO()
+        shell = CorpusShell(catalog_root, stdout=output)
+        shell.onecmd("cleanup linked --apply")
+        shell.onecmd("cleanup --unused-for 1 --apply")
+
+        self.assertTrue(linked.is_symlink())
+        self.assertTrue(external.root.exists())
+        self.assertIn("Symlinked corpus directories cannot be cleaned", output.getvalue())
+
     def test_normal_cli_command_refreshes_last_accessed_timestamp(self):
         with self.corpus.connect() as connection:
             connection.execute("UPDATE corpus_state SET last_accessed_at = '2000-01-01T00:00:00+00:00' WHERE id = 1")
@@ -669,6 +688,19 @@ class CorpusWorkflowTests(unittest.TestCase):
         shell.onecmd("load legacy")
         self.assertIn("Recreate and reingest", output.getvalue())
 
+    def test_catalog_views_handle_an_empty_vector_file(self):
+        catalog_root = self.root / "catalog"
+        corpus = Corpus.create(catalog_root / "empty-vectors")
+        corpus.matrix_path.touch()
+
+        output = StringIO()
+        shell = CorpusShell(catalog_root, stdout=output)
+        shell.onecmd("list")
+        shell.onecmd("info empty-vectors")
+
+        self.assertIn("empty-vectors", output.getvalue())
+        self.assertIn("Index data: 0 rows, - dimensions", output.getvalue())
+
     def test_shell_cleanup_protects_active_corpus_until_logout(self):
         catalog_root = self.root / "catalog"
         output = StringIO()
@@ -698,3 +730,13 @@ class CorpusWorkflowTests(unittest.TestCase):
         direct_parser = cli.build_parser()
         with self.assertRaises(SystemExit):
             direct_parser.parse_args(["show-sentences", "sentence-id"])
+
+    def test_evidence_command_matches_its_execution_context(self):
+        self.assertEqual(
+            cli._format_render_command(self.corpus, ["sentence-id"], interactive=True),
+            "show-sentences sentence-id",
+        )
+        self.assertEqual(
+            cli._format_render_command(self.corpus, ["sentence-id"]),
+            f"cite-this-paper show-sentences --database {self.corpus.root} sentence-id",
+        )
