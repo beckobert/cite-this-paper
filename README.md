@@ -43,22 +43,41 @@ Internally, the package has five stages:
 
 ## Standard workflow
 
-Install the package, create a corpus, add PDFs, rebuild its index, and verify a
-claim:
+Install the package and open an interactive shell. It keeps the selected corpus
+in memory until you `logout` or exit, so regular commands never need a database
+path:
 
 ```bash
 python -m pip install .
 
-cite-this-paper init-db data/corpora/corpus-001
-cite-this-paper add-directory --database data/corpora/corpus-001 /path/to/papers --defer-rebuild
-cite-this-paper rebuild-index --database data/corpora/corpus-001
-cite-this-paper verify-claim --database data/corpora/corpus-001 "Your scientific claim"
+cite-this-paper shell
+
+cite-this-paper> create water
+cite-this-paper[water]> add-directory /path/to/papers --defer-rebuild
+cite-this-paper[water]> rebuild-index
+cite-this-paper[water]> verify-claim "Your scientific claim"
 ```
+
+Named corpora are direct children of `data/corpora` by default. Pass
+`cite-this-paper shell --root PATH`, or set `CITE_THIS_PAPER_ROOT`, to use a
+different catalog root. `list` shows the available corpora, `info [NAME]`
+shows counts/index/model/storage details, `load NAME` switches corpora, and
+`logout` clears the active selection without deleting data.
 
 Use `add-pdf` instead of `add-directory` when adding a single file. New PDFs
 are stored immediately, but do not become searchable until `rebuild-index`
 finishes. The ingestion report states whether rebuilding was completed or
 deferred.
+
+The original one-shot commands remain available for automation and explicit
+filesystem paths, for example:
+
+```bash
+cite-this-paper init-db data/corpora/corpus-001
+cite-this-paper add-directory --database data/corpora/corpus-001 /path/to/papers --defer-rebuild
+cite-this-paper rebuild-index --database data/corpora/corpus-001
+cite-this-paper verify-claim --database data/corpora/corpus-001 "Your scientific claim"
+```
 
 Verification always follows the same sequence:
 
@@ -75,6 +94,10 @@ Each verification result includes source metadata, the verifier’s reason, and
 one copy-pasteable command for displaying all selected evidence:
 
 ```bash
+# In the interactive shell:
+show-sentences <sentence-id> [<sentence-id> ...]
+
+# In one-shot mode:
 cite-this-paper show-sentences --database data/corpora/water <sentence-id> [<sentence-id> ...]
 ```
 
@@ -142,3 +165,9 @@ Normal corpus commands update the last-access timestamp used by age-based
 cleanup. The schema is intentionally development-oriented and has no migration
 path: recreate corpora after incompatible schema changes. Explicit cleanup can
 still remove an older corpus by path.
+
+Inside the interactive shell, use `cleanup NAME ...` or
+`cleanup --unused-for DAYS` for the selected catalog root. It has the same
+preview-first behavior and requires `--apply` for deletion. The currently
+loaded corpus is always protected; use `logout` or load another corpus before
+cleaning it up.

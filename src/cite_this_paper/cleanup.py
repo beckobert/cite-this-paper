@@ -51,7 +51,13 @@ def inspect_corpus(root: Path, *, protected_root: Path | None = None) -> Cleanup
     return CleanupResult(root, last_accessed_at, corpus_size(root), "ready")
 
 
-def find_inactive_corpora(root: Path, unused_for_days: int, *, now: datetime | None = None) -> list[CleanupResult]:
+def find_inactive_corpora(
+    root: Path,
+    unused_for_days: int,
+    *,
+    now: datetime | None = None,
+    recursive: bool = True,
+) -> list[CleanupResult]:
     """Find valid, tracked corpus directories inactive for the requested duration."""
     if unused_for_days <= 0:
         raise ValueError("The unused-for duration must be a positive number of days.")
@@ -60,7 +66,8 @@ def find_inactive_corpora(root: Path, unused_for_days: int, *, now: datetime | N
         raise ValueError(f"Cleanup root does not exist: {root}")
     cutoff = (now or datetime.now(UTC)) - timedelta(days=unused_for_days)
     results: list[CleanupResult] = []
-    for database_path in sorted(root.rglob("corpus.sqlite")):
+    database_paths = root.rglob("corpus.sqlite") if recursive else root.glob("*/corpus.sqlite")
+    for database_path in sorted(database_paths):
         candidate = inspect_corpus(database_path.parent, protected_root=root)
         if candidate.status != "ready":
             results.append(candidate)

@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from .schema import connect, initialize
+from .schema import SCHEMA_VERSION, connect, initialize
 
 
 class CorpusError(RuntimeError):
@@ -82,8 +82,22 @@ class Corpus:
     @classmethod
     def open(cls, root: Path) -> "Corpus":
         corpus = cls(root.expanduser().resolve())
-        if not corpus.database_path.exists():
+        if not corpus.database_path.is_file():
             raise CorpusError(f"Not a corpus database: {corpus.root}")
+        try:
+            with corpus.connect() as connection:
+                row = connection.execute(
+                    "SELECT schema_version FROM corpus_state WHERE id = 1"
+                ).fetchone()
+        except Exception as error:
+            raise CorpusError(f"Could not open corpus database: {corpus.root}") from error
+        if row is None:
+            raise CorpusError(f"Corpus database has no state record: {corpus.root}")
+        if int(row["schema_version"]) != SCHEMA_VERSION:
+            raise CorpusError(
+                f"Corpus schema version {row['schema_version']} is incompatible with this "
+                f"version (requires {SCHEMA_VERSION}). Recreate and reingest the corpus."
+            )
         return corpus
 
     def connect(self):

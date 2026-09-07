@@ -23,6 +23,10 @@ RESPONSIBILITY_NOTICE = (
     "the result."
 )
 
+OPERATIONAL_COMMANDS = frozenset(
+    {"add-pdf", "add-directory", "rebuild-index", "verify-claim", "show-sentences"}
+)
+
 
 def _format_size(size_bytes: int) -> str:
     value = float(size_bytes)
@@ -208,16 +212,17 @@ def _passage_sentence_records(corpus: Corpus, passage_id: int) -> list[dict]:
     return [dict(row) for row in rows]
 
 
-def _format_render_command(corpus: Corpus, sentence_ids: list[str]) -> str:
-    return shlex.join(
-        [
-            "cite-this-paper",
-            "show-sentences",
-            "--database",
-            str(corpus.root),
-            *sentence_ids,
-        ]
-    )
+def _format_render_command(
+    corpus: Corpus,
+    sentence_ids: list[str],
+    *,
+    interactive: bool = False,
+) -> str:
+    command = ["cite-this-paper", "show-sentences"]
+    if not interactive:
+        command.extend(["--database", str(corpus.root)])
+    command.extend(sentence_ids)
+    return shlex.join(command)
 
 
 def _print_sentence_evidence(sentence: dict) -> None:
@@ -249,6 +254,7 @@ def _print_verification_output(
     results: list,
     *,
     verbose: bool,
+    interactive: bool = False,
 ) -> None:
     print()
     print("=" * 80)
@@ -308,6 +314,7 @@ def _print_verification_output(
                 + _format_render_command(
                     corpus,
                     [sentence["display_id"] for sentence in evidence],
+                    interactive=interactive,
                 )
             )
         else:
@@ -361,16 +368,26 @@ def _prepare_verification(
         print("Please choose rebuild, continue, or quit.")
 
 
-def build_parser() -> argparse.ArgumentParser:
+def build_parser(*, session: bool = False) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="cite-this-paper", description="Manage and query source-grounded PDF corpora.")
     commands = parser.add_subparsers(dest="command", required=True)
+    database_required = not session
 
     init = commands.add_parser("init-db", help="Create a new independent corpus.")
     init.add_argument("database", type=Path, help="Directory for the new corpus")
 
+    if not session:
+        shell = commands.add_parser("shell", help="Start an interactive named-corpus shell.")
+        shell.add_argument(
+            "--root",
+            type=Path,
+            help="Named-corpus root; overrides CITE_THIS_PAPER_ROOT and the default.",
+        )
+
     for name, source_help in (("add-pdf", "PDF to ingest"), ("add-directory", "Directory scanned recursively for PDFs")):
         add = commands.add_parser(name, help=f"Ingest {source_help.lower()}.")
-        add.add_argument("--database", required=True, type=Path)
+        if database_required:
+            add.add_argument("--database", required=True, type=Path)
         add.add_argument("source", type=Path, help=source_help)
         add.add_argument("--on-duplicate", choices=["ask", "discard", "replace"], default="ask")
         rebuild_group = add.add_mutually_exclusive_group()
@@ -381,11 +398,13 @@ def build_parser() -> argparse.ArgumentParser:
         _add_metadata_arguments(add)
 
     rebuild = commands.add_parser("rebuild-index", help="Rebuild dense and lexical indexes.")
-    rebuild.add_argument("--database", required=True, type=Path)
+    if database_required:
+        rebuild.add_argument("--database", required=True, type=Path)
     rebuild.add_argument("--quiet", action="store_true", help="Suppress processing updates and progress bars.")
 
     verify = commands.add_parser("verify-claim", help="Retrieve, rerank, and verify evidence for a claim.")
-    verify.add_argument("--database", required=True, type=Path)
+    if database_required:
+        verify.add_argument("--database", required=True, type=Path)
     verify.add_argument("claim")
     verify.add_argument("--candidate-k", type=int, default=100)
     verify.add_argument("--rerank-k", type=int, default=30)
@@ -409,11 +428,72 @@ def build_parser() -> argparse.ArgumentParser:
         "show-sentences",
         help="Render highlighted source sentences, grouped into one image per PDF page.",
     )
-    show.add_argument("--database", required=True, type=Path)
+    if database_required:
+        show.add_argument("--database", required=True, type=Path)
     show.add_argument("sentence_ids", nargs="+", help="One or more sentence IDs to highlight")
     show.add_argument("--output-dir", type=Path)
     show.add_argument("--dpi", type=int, default=150)
     return parser
+
+
+def execute_operational(
+    args: argparse.Namespace,
+    corpus: Corpus,
+    *,
+    interactive: bool = False,
+) -> int:
+    """Run one corpus operation from either direct CLI or an active shell."""
+    corpus.touch_access()
+    reporter = ConsoleReporter(quiet=getattr(args, "quiet", False))
+    if args.command == "add-pdf":
+        result = _ingest_one(corpus, args.source, args, reporter)
+        index_status = _maybe_rebuild(corpus, args, result.status == "added", reporter)
+        _print_ingestion_report(corpus, [result], index_status)
+        return 0 if result.status != "failed" else 1
+    if args.command == "add-directory":
+        results: list[IngestResult] = []
+        sources = sorted(args.source.expanduser().resolve().rglob("*.pdf"))
+        for source in sources:
+            result = _ingest_one(corpus, source, args, reporter)
+            results.append(result)
+        index_status = _maybe_rebuild(corpus, args, any(result.status == "added" for result in results), reporter)
+        _print_ingestion_report(corpus, results, index_status)
+        return 1 if any(result.status == "failed" for result in results) else 0
+    if args.command == "rebuild-index":
+        result = rebuild_index(corpus, reporter=reporter)
+        print(f"Rebuilt {result.indexed_passages} passages ({result.dimensions} dimensions).")
+        return 0
+    if args.command == "verify-claim":
+        if not _prepare_verification(corpus, args, reporter):
+            return 0
+        run_id, warning, results = verify_claim(
+            corpus, args.claim, candidate_k=args.candidate_k, rerank_k=args.rerank_k,
+            verify_k=args.verify_k, device=args.device, reporter=reporter,
+        )
+        _print_verification_output(
+            corpus,
+            args.claim,
+            run_id,
+            warning,
+            results,
+            verbose=args.verbose,
+            interactive=interactive,
+        )
+        return 0
+    if args.command == "show-sentences":
+        rendered_pages = render_sentences(
+            corpus,
+            args.sentence_ids,
+            args.output_dir or corpus.root / "review",
+            args.dpi,
+        )
+        print(f"Rendered {len(args.sentence_ids)} sentence(s) across {len(rendered_pages)} page(s):")
+        for rendered_page in rendered_pages:
+            print(f"{rendered_page.filename} — page {rendered_page.page_number}")
+            print("  Sentences: " + ", ".join(rendered_page.sentence_ids))
+            print(f"  Rendered page: {rendered_page.output_path}")
+        return 0
+    raise CorpusError(f"Not a corpus operation: {args.command}")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -423,59 +503,13 @@ def main(argv: list[str] | None = None) -> int:
             Corpus.create(args.database)
             print(f"Created corpus: {args.database.resolve()}")
             return 0
+        if args.command == "shell":
+            from .shell import run_shell
+
+            return run_shell(args.root)
         if args.command == "cleanup-databases":
             return _cleanup_command(args)
-        corpus = Corpus.open(args.database)
-        corpus.touch_access()
-        reporter = ConsoleReporter(quiet=getattr(args, "quiet", False))
-        if args.command == "add-pdf":
-            result = _ingest_one(corpus, args.source, args, reporter)
-            index_status = _maybe_rebuild(corpus, args, result.status == "added", reporter)
-            _print_ingestion_report(corpus, [result], index_status)
-            return 0 if result.status != "failed" else 1
-        if args.command == "add-directory":
-            results: list[IngestResult] = []
-            sources = sorted(args.source.expanduser().resolve().rglob("*.pdf"))
-            for source in sources:
-                result = _ingest_one(corpus, source, args, reporter)
-                results.append(result)
-            index_status = _maybe_rebuild(corpus, args, any(result.status == "added" for result in results), reporter)
-            _print_ingestion_report(corpus, results, index_status)
-            return 1 if any(result.status == "failed" for result in results) else 0
-        if args.command == "rebuild-index":
-            result = rebuild_index(corpus, reporter=reporter)
-            print(f"Rebuilt {result.indexed_passages} passages ({result.dimensions} dimensions).")
-            return 0
-        if args.command == "verify-claim":
-            if not _prepare_verification(corpus, args, reporter):
-                return 0
-            run_id, warning, results = verify_claim(
-                corpus, args.claim, candidate_k=args.candidate_k, rerank_k=args.rerank_k,
-                verify_k=args.verify_k, device=args.device, reporter=reporter,
-            )
-            _print_verification_output(
-                corpus,
-                args.claim,
-                run_id,
-                warning,
-                results,
-                verbose=args.verbose,
-            )
-            return 0
-        if args.command == "show-sentences":
-            rendered_pages = render_sentences(
-                corpus,
-                args.sentence_ids,
-                args.output_dir or corpus.root / "review",
-                args.dpi,
-            )
-            print(f"Rendered {len(args.sentence_ids)} sentence(s) across {len(rendered_pages)} page(s):")
-            for rendered_page in rendered_pages:
-                print(f"{rendered_page.filename} — page {rendered_page.page_number}")
-                print("  Sentences: " + ", ".join(rendered_page.sentence_ids))
-                print(f"  Rendered page: {rendered_page.output_path}")
-            return 0
+        return execute_operational(args, Corpus.open(args.database))
     except CorpusError as error:
         print(f"ERROR: {error}", file=sys.stderr)
         return 2
-    return 2

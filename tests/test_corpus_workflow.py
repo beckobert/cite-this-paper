@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
 from collections import OrderedDict
@@ -15,6 +16,7 @@ import pymupdf
 
 from cite_this_paper.corpus import Corpus, CorpusError
 from cite_this_paper import cli
+from cite_this_paper.catalog import resolve_catalog_root
 from cite_this_paper.indexing import IndexResult, rebuild_index
 from cite_this_paper.ingest import ingest_pdf
 from cite_this_paper.models import (
@@ -28,6 +30,7 @@ from cite_this_paper.progress import ConsoleReporter
 from cite_this_paper.processing import sentences as sentence_processing
 from cite_this_paper.review import render_sentences
 from cite_this_paper.retrieval import verify_claim
+from cite_this_paper.shell import CorpusShell
 
 
 class FakeEmbeddingModel:
@@ -617,3 +620,81 @@ class CorpusWorkflowTests(unittest.TestCase):
             stdin.isatty.return_value = True
             self.assertTrue(cli._prepare_verification(self.corpus, args))
         rebuild.assert_called_once_with(self.corpus)
+
+    def test_catalog_root_precedence_and_shell_selection_lifecycle(self):
+        environment_root = self.root / "environment-root"
+        explicit_root = self.root / "explicit-root"
+        with patch.dict(os.environ, {"CITE_THIS_PAPER_ROOT": str(environment_root)}, clear=False):
+            self.assertEqual(resolve_catalog_root(), environment_root.resolve())
+            self.assertEqual(resolve_catalog_root(explicit_root), explicit_root.resolve())
+
+        output = StringIO()
+        shell = CorpusShell(environment_root, stdout=output)
+        shell.onecmd("rebuild-index")
+        self.assertIn("No active corpus", output.getvalue())
+
+        shell.onecmd("create water")
+        self.assertEqual(shell.active_name, "water")
+        self.assertTrue((environment_root / "water" / "corpus.sqlite").exists())
+        shell.onecmd("logout")
+        self.assertIsNone(shell.active_name)
+        shell.onecmd("load water")
+        self.assertEqual(shell.active_name, "water")
+
+        new_shell = CorpusShell(environment_root, stdout=StringIO())
+        self.assertIsNone(new_shell.active_name)
+
+    def test_catalog_list_info_and_incompatible_corpus_are_safe(self):
+        catalog_root = self.root / "catalog"
+        healthy = Corpus.create(catalog_root / "healthy")
+        legacy = Corpus.create(catalog_root / "legacy")
+        with legacy.connect() as connection:
+            connection.execute("UPDATE corpus_state SET schema_version = 1 WHERE id = 1")
+            connection.commit()
+
+        output = StringIO()
+        shell = CorpusShell(catalog_root, stdout=output)
+        shell.onecmd("load healthy")
+        shell.onecmd("list")
+        shell.onecmd("info healthy")
+        shell.onecmd("info legacy")
+        text = output.getvalue()
+        self.assertIn("healthy", text)
+        self.assertIn("legacy", text)
+        self.assertIn("incompatible", text)
+        self.assertIn("Content: 0 documents", text)
+
+        with self.assertRaises(CorpusError):
+            Corpus.open(legacy.root)
+        shell.onecmd("load legacy")
+        self.assertIn("Recreate and reingest", output.getvalue())
+
+    def test_shell_cleanup_protects_active_corpus_until_logout(self):
+        catalog_root = self.root / "catalog"
+        output = StringIO()
+        shell = CorpusShell(catalog_root, stdout=output)
+        shell.onecmd("create water")
+        water_path = catalog_root / "water"
+        shell.onecmd("cleanup water --apply")
+        self.assertTrue(water_path.exists())
+        self.assertIn("PROTECTED", output.getvalue())
+
+        shell.onecmd("logout")
+        shell.onecmd("cleanup water --apply")
+        self.assertFalse(water_path.exists())
+
+    def test_shell_cleanup_keeps_all_targets_when_one_name_is_invalid(self):
+        catalog_root = self.root / "catalog"
+        Corpus.create(catalog_root / "keep-me")
+        output = StringIO()
+        shell = CorpusShell(catalog_root, stdout=output)
+        shell.onecmd("cleanup keep-me missing --apply")
+        self.assertTrue((catalog_root / "keep-me").exists())
+        self.assertIn("INVALID", output.getvalue())
+
+    def test_session_parser_omits_database_but_direct_parser_keeps_it_required(self):
+        session_args = cli.build_parser(session=True).parse_args(["show-sentences", "sentence-id"])
+        self.assertFalse(hasattr(session_args, "database"))
+        direct_parser = cli.build_parser()
+        with self.assertRaises(SystemExit):
+            direct_parser.parse_args(["show-sentences", "sentence-id"])
