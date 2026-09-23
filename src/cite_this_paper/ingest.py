@@ -10,6 +10,7 @@ from typing import Any, Literal
 
 from .processing.classification import classify_document
 from .processing.passages import build_passages_for_block, group_sentences
+from .processing.metadata import extract_document_metadata
 from .processing.pdf_extraction import extract_pdf
 from .processing.sentences import build_sentences_for_page, create_nlp
 
@@ -35,21 +36,33 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _metadata_values(document: dict[str, Any], overrides: dict[str, Any] | None) -> dict[str, Any]:
-    raw = document.get("metadata") or {}
+def _metadata_values(extracted: dict[str, Any] | None, overrides: dict[str, Any] | None) -> dict[str, Any]:
+    selected = (extracted or {}).get("selected") or {}
     values: dict[str, Any] = {
-        "title": raw.get("title") or None,
-        "authors_json": json.dumps([raw["author"]]) if raw.get("author") else "[]",
-        "publication_year": None,
-        "journal": None,
-        "volume": None,
-        "issue": None,
-        "page_range": None,
-        "doi": None,
-        "abstract": raw.get("subject") or None,
+        "title": selected.get("title"),
+        "authors_json": json.dumps([selected["authors"]]) if selected.get("authors") else "[]",
+        "publication_year": selected.get("publication_year"),
+        "journal": selected.get("journal"),
+        "volume": selected.get("volume"),
+        "issue": selected.get("issue"),
+        "page_range": selected.get("page_range"),
+        "starting_page": selected.get("starting_page"),
+        "ending_page": selected.get("ending_page"),
+        "publication_date": selected.get("publication_date"),
+        "doi": selected.get("doi"),
+        "issn_json": json.dumps(selected.get("issn") or [], ensure_ascii=False),
+        "eissn_json": json.dumps(selected.get("eissn") or [], ensure_ascii=False),
+        "arxiv_json": json.dumps(selected.get("arxiv") or [], ensure_ascii=False),
+        "pmid_json": json.dumps(selected.get("pmid") or [], ensure_ascii=False),
+        "pmc_json": json.dumps(selected.get("pmc") or [], ensure_ascii=False),
+        "abstract": None,
         "citation_key": None,
-        "raw_metadata_json": json.dumps(raw, ensure_ascii=False),
+        "metadata_candidates_json": json.dumps((extracted or {}).get("candidates") or {}, ensure_ascii=False),
     }
+    return _apply_metadata_overrides(values, overrides)
+
+
+def _apply_metadata_overrides(values: dict[str, Any], overrides: dict[str, Any] | None) -> dict[str, Any]:
     if overrides:
         for key, value in overrides.items():
             if value is None or key not in values:
@@ -92,12 +105,20 @@ def _record_error(corpus: Corpus, source: Path, error: Exception) -> None:
         connection.commit()
 
 
+def _read_metadata(document: dict[str, Any], pages: list[dict[str, Any]], source: Path) -> dict[str, Any] | None:
+    """Run optional metadata heuristics without affecting PDF-content ingestion."""
+    try:
+        return extract_document_metadata(document, pages, source)
+    except Exception:
+        return None
+
+
 def _replace_duplicate(
     corpus: Corpus,
     source: Path,
     sha256: str,
     existing: dict[str, Any],
-    metadata_overrides: dict[str, Any] | None,
+    metadata: dict[str, Any] | None,
 ) -> IngestResult:
     stored = corpus.store_pdf(source, sha256, replace=True)
     now = utc_now()
@@ -111,12 +132,14 @@ def _replace_duplicate(
     parameters: list[Any] = [str(stored), str(source), source.name, source.stat().st_size, now]
     metadata_columns = {
         "title", "authors_json", "publication_year", "journal", "volume", "issue",
-        "page_range", "doi", "abstract", "citation_key",
+        "page_range", "starting_page", "ending_page", "publication_date", "doi", "issn_json",
+        "eissn_json", "arxiv_json", "pmid_json", "pmc_json", "abstract", "citation_key",
+        "metadata_candidates_json",
     }
-    for key, value in (metadata_overrides or {}).items():
-        if key in metadata_columns and value is not None:
+    for key, value in (metadata or {}).items():
+        if key in metadata_columns:
             assignments.append(f"{key} = ?")
-            parameters.append(json.dumps(value) if key == "authors_json" and not isinstance(value, str) else value)
+            parameters.append(value)
     parameters.append(existing["id"])
     with corpus.connect() as connection:
         connection.execute(
@@ -152,7 +175,19 @@ def ingest_pdf(
             report_stage(reporter, "Duplicate document found; keeping the existing copy.")
             return IngestResult(source, "discarded", existing["id"])
         report_stage(reporter, "Duplicate document found; replacing its managed copy and metadata.")
-        return _replace_duplicate(corpus, source, sha256, existing, metadata_overrides)
+        try:
+            duplicate_document, duplicate_pages = extract_pdf(source)
+            replacement_metadata = _metadata_values(
+                _read_metadata(duplicate_document, duplicate_pages, source), metadata_overrides
+            )
+        except Exception:
+            # Keep metadata already associated with the known PDF if even its
+            # content cannot be reopened while replacing the managed file, but
+            # still honor explicit user corrections.
+            replacement_metadata = _apply_metadata_overrides(
+                {key: existing[key] for key in existing if key != "id"}, metadata_overrides
+            )
+        return _replace_duplicate(corpus, source, sha256, existing, replacement_metadata)
 
     try:
         extracted_document, pages = extract_pdf(source)
@@ -175,7 +210,8 @@ def ingest_pdf(
 
     stored = corpus.store_pdf(source, sha256, replace=False)
     now = utc_now()
-    metadata = _metadata_values(extracted_document, metadata_overrides)
+    extracted_metadata = _read_metadata(extracted_document, pages, source)
+    metadata = _metadata_values(extracted_metadata, metadata_overrides)
     try:
         with corpus.connect() as connection:
             cursor = connection.execute(
@@ -183,15 +219,19 @@ def ingest_pdf(
                 INSERT INTO documents (
                     sha256, stored_path, source_path, filename, byte_size, page_count,
                     title, authors_json, publication_year, journal, volume, issue, page_range,
-                    doi, abstract, citation_key, raw_metadata_json, added_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    starting_page, ending_page, publication_date, doi,
+                    issn_json, eissn_json, arxiv_json, pmid_json, pmc_json,
+                    abstract, citation_key, metadata_candidates_json, added_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     sha256, str(stored), str(source), source.name, source.stat().st_size,
                     extracted_document["page_count"], metadata["title"], metadata["authors_json"],
                     metadata["publication_year"], metadata["journal"], metadata["volume"], metadata["issue"],
-                    metadata["page_range"], metadata["doi"], metadata["abstract"], metadata["citation_key"],
-                    metadata["raw_metadata_json"], now, now,
+                    metadata["page_range"], metadata["starting_page"], metadata["ending_page"],
+                    metadata["publication_date"], metadata["doi"], metadata["issn_json"], metadata["eissn_json"],
+                    metadata["arxiv_json"], metadata["pmid_json"], metadata["pmc_json"], metadata["abstract"],
+                    metadata["citation_key"], metadata["metadata_candidates_json"], now, now,
                 ),
             )
             document_id = int(cursor.lastrowid)

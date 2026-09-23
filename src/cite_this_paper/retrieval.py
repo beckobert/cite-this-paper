@@ -57,7 +57,8 @@ def _passage_record(connection, passage_id: int) -> dict[str, Any]:
         """
         SELECT p.id, p.display_id, p.source_text, p.normalized_text, p.word_count,
                p.content_type, pg.page_number, d.id AS document_id, d.filename,
-               d.title, d.authors_json, d.doi
+               d.title, d.authors_json, d.publication_year, d.journal, d.volume,
+               d.issue, d.page_range, d.doi
         FROM passages AS p
         JOIN pages AS pg ON pg.id = p.page_id
         JOIN documents AS d ON d.id = p.document_id

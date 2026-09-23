@@ -6,7 +6,7 @@ import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 SCHEMA = """
@@ -38,10 +38,18 @@ CREATE TABLE IF NOT EXISTS documents (
     volume TEXT,
     issue TEXT,
     page_range TEXT,
+    starting_page TEXT,
+    ending_page TEXT,
+    publication_date TEXT,
     doi TEXT,
+    issn_json TEXT NOT NULL DEFAULT '[]',
+    eissn_json TEXT NOT NULL DEFAULT '[]',
+    arxiv_json TEXT NOT NULL DEFAULT '[]',
+    pmid_json TEXT NOT NULL DEFAULT '[]',
+    pmc_json TEXT NOT NULL DEFAULT '[]',
     abstract TEXT,
     citation_key TEXT,
-    raw_metadata_json TEXT NOT NULL DEFAULT '{}',
+    metadata_candidates_json TEXT NOT NULL DEFAULT '{}',
     added_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );

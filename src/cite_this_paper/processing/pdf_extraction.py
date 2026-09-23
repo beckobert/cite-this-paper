@@ -38,6 +38,18 @@ def extract_word(word_tuple: tuple) -> dict:
     }
 
 
+def extract_text_block(block_tuple: tuple) -> dict | None:
+    """Convert a text block into the small layout record used by metadata extraction."""
+    x0, y0, x1, y1, text, block_no, block_type = block_tuple
+    if block_type != 0 or not text.strip():
+        return None
+    return {
+        "text": text.strip(),
+        "bbox": [round(x0, 3), round(y0, 3), round(x1, 3), round(y1, 3)],
+        "block_no": block_no,
+    }
+
+
 def extract_pdf(pdf_path: Path) -> tuple[dict, list[dict]]:
     """
     Extract document-level metadata and page-level text/provenance.
@@ -76,6 +88,7 @@ def extract_pdf(pdf_path: Path) -> tuple[dict, list[dict]]:
             words = [extract_word(word) for word in words_raw]
 
             blocks_raw = page.get_text("blocks", sort=False)
+            blocks = [block for raw_block in blocks_raw if (block := extract_text_block(raw_block))]
 
             stripped_text = text.strip()
 
@@ -99,9 +112,12 @@ def extract_pdf(pdf_path: Path) -> tuple[dict, list[dict]]:
                 "text": text,
                 "text_extraction_method": "pymypdf_native",
                 "words": words,
+                # Blocks are used in-memory by the metadata reader to find recurring
+                # headers and footers. They are intentionally not persisted in pages.
+                "blocks": blocks,
                 "character_count": len(text),
                 "word_count": len(words),
-                "block_count": sum(block[6] == 0 for block in blocks_raw),
+                "block_count": len(blocks),
             }
 
             pages.append(page_record)
@@ -110,4 +126,3 @@ def extract_pdf(pdf_path: Path) -> tuple[dict, list[dict]]:
 
     finally:
         doc.close()
-
