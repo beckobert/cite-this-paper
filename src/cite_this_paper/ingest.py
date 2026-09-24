@@ -10,7 +10,7 @@ from typing import Any, Literal
 
 from .processing.classification import classify_document
 from .processing.passages import build_passages_for_block, group_sentences
-from .processing.metadata import extract_document_metadata
+from .processing.metadata import extract_document_metadata, review_payload
 from .processing.pdf_extraction import extract_pdf
 from .processing.sentences import build_sentences_for_page, create_nlp
 
@@ -37,27 +37,33 @@ def sha256_file(path: Path) -> str:
 
 
 def _metadata_values(extracted: dict[str, Any] | None, overrides: dict[str, Any] | None) -> dict[str, Any]:
-    selected = (extracted or {}).get("selected") or {}
+    extracted = extracted or {}
+    identifiers = extracted.get("identifiers") or {}
+    bibliographic = extracted.get("bibliographic") or {}
+    starting_page = bibliographic.get("starting_page")
+    ending_page = bibliographic.get("ending_page")
+    page_range = f"{starting_page}–{ending_page}" if starting_page and ending_page else starting_page or ending_page
+    publication_year = bibliographic.get("year")
     values: dict[str, Any] = {
-        "title": selected.get("title"),
-        "authors_json": json.dumps([selected["authors"]]) if selected.get("authors") else "[]",
-        "publication_year": selected.get("publication_year"),
-        "journal": selected.get("journal"),
-        "volume": selected.get("volume"),
-        "issue": selected.get("issue"),
-        "page_range": selected.get("page_range"),
-        "starting_page": selected.get("starting_page"),
-        "ending_page": selected.get("ending_page"),
-        "publication_date": selected.get("publication_date"),
-        "doi": selected.get("doi"),
-        "issn_json": json.dumps(selected.get("issn") or [], ensure_ascii=False),
-        "eissn_json": json.dumps(selected.get("eissn") or [], ensure_ascii=False),
-        "arxiv_json": json.dumps(selected.get("arxiv") or [], ensure_ascii=False),
-        "pmid_json": json.dumps(selected.get("pmid") or [], ensure_ascii=False),
-        "pmc_json": json.dumps(selected.get("pmc") or [], ensure_ascii=False),
+        "title": extracted.get("title"),
+        "authors_json": json.dumps([extracted["authors_raw"]]) if extracted.get("authors_raw") else "[]",
+        "publication_year": int(publication_year) if publication_year else None,
+        "journal": extracted.get("journal"),
+        "volume": bibliographic.get("volume"),
+        "issue": bibliographic.get("issue"),
+        "page_range": page_range,
+        "starting_page": starting_page,
+        "ending_page": ending_page,
+        "publication_date": bibliographic.get("publication_date"),
+        "doi": extracted.get("doi"),
+        "issn_json": json.dumps(identifiers.get("issn") or [], ensure_ascii=False),
+        "eissn_json": json.dumps(identifiers.get("eissn") or [], ensure_ascii=False),
+        "arxiv_json": json.dumps(identifiers.get("arxiv") or [], ensure_ascii=False),
+        "pmid_json": json.dumps(identifiers.get("pmid") or [], ensure_ascii=False),
+        "pmc_json": json.dumps(identifiers.get("pmc") or [], ensure_ascii=False),
         "abstract": None,
         "citation_key": None,
-        "metadata_candidates_json": json.dumps((extracted or {}).get("candidates") or {}, ensure_ascii=False),
+        "metadata_candidates_json": json.dumps(review_payload(extracted) if extracted else {}, ensure_ascii=False),
     }
     return _apply_metadata_overrides(values, overrides)
 

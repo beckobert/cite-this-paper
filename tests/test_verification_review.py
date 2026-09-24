@@ -86,6 +86,40 @@ class VerificationAndReviewTests(CorpusTestCase):
         self.assertEqual((accepted.label, accepted.parse_success), ("NOT_MENTIONED", True))
         self.assertEqual((rejected.label, rejected.parse_success), ("VERIFICATION_ERROR", False))
 
+    def test_source_metadata_is_displayed_on_separate_labeled_lines(self):
+        lines = cli._source_metadata_lines(
+            {
+                "title": "An Extracted Paper",
+                "authors_json": '["Ada Lovelace", "Grace Hopper"]',
+                "doi": "10.1234/example",
+                "journal": "Journal of Testing",
+                "volume": "12",
+                "issue": "3",
+                "page_range": "101–109",
+                "publication_year": 2025,
+                "publication_date": "2025-03-01",
+                "filename": "paper.pdf",
+                "stored_path": "/corpus/documents/paper.pdf",
+                "page_number": 2,
+            }
+        )
+        self.assertEqual(
+            lines,
+            [
+                "Title:   An Extracted Paper",
+                "Authors: Ada Lovelace; Grace Hopper",
+                "DOI:     10.1234/example",
+                "Journal: Journal of Testing, vol. 12, issue 3, pp. 101–109, (2025)",
+                "File:    paper.pdf",
+                "Path:    /corpus/documents/paper.pdf",
+                "Page:    2",
+            ],
+        )
+
+    def test_source_metadata_omits_unavailable_fields_but_keeps_file_and_path(self):
+        lines = cli._source_metadata_lines({"filename": "paper.pdf", "stored_path": "/corpus/paper.pdf", "page_number": 1})
+        self.assertEqual(lines, ["File:    paper.pdf", "Path:    /corpus/paper.pdf", "Page:    1"])
+
     def test_pending_documents_warn_after_a_previous_rebuild(self):
         self._make_stale_index()
         _, warning, _ = self._verify(FakeVerifier(), claim="scientific evidence")

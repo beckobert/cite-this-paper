@@ -245,32 +245,43 @@ def _format_rank_score(label: str, rank: int | None, score: float | None, score_
     return f"  {label}: rank {rank} | {score_name} {score:.4f}"
 
 
-def _format_source_citation(record: dict) -> str:
-    """Format the resolved paper metadata without exposing extraction diagnostics."""
-    title = record.get("title") or record["filename"]
+def _source_metadata_lines(record: dict) -> list[str]:
+    """Render resolved metadata as inspectable, labeled source lines."""
+    lines: list[str] = []
+    if record.get("title"):
+        lines.append(f"Title:   {record['title']}")
     try:
         authors = json.loads(record.get("authors_json") or "[]")
     except (TypeError, json.JSONDecodeError):
         authors = []
     author_text = "; ".join(str(author) for author in authors if author)
+    if author_text:
+        lines.append(f"Authors: {author_text}")
+    if record.get("doi"):
+        lines.append(f"DOI:     {record['doi']}")
+
     publication: list[str] = []
     if record.get("journal"):
         publication.append(str(record["journal"]))
-    volume_issue = str(record["volume"] or "")
+    volume_issue = f"vol. {record['volume']}" if record.get("volume") else ""
     if record.get("issue"):
-        volume_issue += f"({record['issue']})"
+        volume_issue += f", issue {record['issue']}"
     if volume_issue:
         publication.append(volume_issue)
     if record.get("page_range"):
-        publication.append(str(record["page_range"]))
+        publication.append(f"pp. {record['page_range']}")
     if record.get("publication_year"):
         publication.append(f"({record['publication_year']})")
-    parts = [title]
-    if author_text:
-        parts.append(author_text)
+    elif record.get("publication_date"):
+        publication.append(f"({record['publication_date']})")
     if publication:
-        parts.append(", ".join(publication))
-    return ". ".join(parts)
+        lines.append(f"Journal: {', '.join(publication)}")
+
+    lines.append(f"File:    {record['filename']}")
+    if record.get("stored_path"):
+        lines.append(f"Path:    {record['stored_path']}")
+    lines.append(f"Page:    {record['page_number']}")
+    return lines
 
 
 def _print_verification_output(
@@ -303,17 +314,14 @@ def _print_verification_output(
         record = candidate.record
         verdict = candidate.verification
         label = verdict.label if verdict else "UNVERIFIED"
-        citation = _format_source_citation(record)
+        source_lines = _source_metadata_lines(record)
 
         print()
         print("-" * 80)
         print(f"RESULT {rank}: {label}")
         print("-" * 80)
-        print(f"Source: {citation}")
-        print(f"File:   {record['filename']}")
-        print(f"Page:   {record['page_number']}")
-        if record.get("doi"):
-            print(f"DOI:    {record['doi']}")
+        for source_line in source_lines:
+            print(source_line)
         if verdict:
             print("Reason:")
             print(textwrap.fill(verdict.reason or "No reason was provided.", width=80, initial_indent="  ", subsequent_indent="  "))
