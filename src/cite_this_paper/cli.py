@@ -430,7 +430,8 @@ def build_parser(*, session: bool = False) -> argparse.ArgumentParser:
         rebuild_group.add_argument("--defer-rebuild", action="store_true")
         add.add_argument("--quiet", action="store_true", help="Suppress processing updates and progress bars.")
         add.add_argument("--debug", action="store_true", help="Show low-level PDF extraction diagnostics.")
-        _add_metadata_arguments(add)
+        if name == "add-pdf":
+            _add_metadata_arguments(add)
 
     rebuild = commands.add_parser("rebuild-index", help="Rebuild dense and lexical indexes.")
     if database_required:

@@ -126,15 +126,16 @@ by SHA-256 hash.
 - `--on-duplicate discard` keeps the stored copy; `replace` updates it. Without
   either option, an interactive session asks which action to take.
 - `--rebuild` rebuilds immediately; `--defer-rebuild` leaves it for later.
-- `--title`, `--author`, `--year`, `--journal`, `--doi`, and `--citation-key`
-  override document metadata.
+- `add-pdf` accepts `--title`, `--author`, `--year`, `--journal`, `--doi`, and
+  `--citation-key` to override that PDF's document metadata. `add-directory`
+  always extracts metadata independently for each PDF.
 - `--debug` shows low-level extraction diagnostics, including merged physical
   PDF blocks.
 - `--quiet` hides interim processing messages while keeping the final report.
 
-Currently, only the metadata attached to the PDF or supplied by the user is
-considered. In the future, the package will try to extract the metadata directly
-from the PDF.
+Metadata is extracted from each PDF, including its embedded metadata and
+front-page content. Manual `add-pdf` values override the corresponding
+extracted fields.
 
 ### Indexing and verification
 

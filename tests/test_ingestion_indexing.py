@@ -114,6 +114,32 @@ class IngestionAndIndexingTests(CorpusTestCase):
         self.assertIn("INGESTION REPORT", output.getvalue())
         self.assertNotIn("Processing PDF:", output.getvalue())
 
+    def test_manual_metadata_options_are_available_only_for_single_pdf_ingestion(self):
+        parser = cli.build_parser()
+        single_pdf = parser.parse_args([
+            "add-pdf", "--database", str(self.corpus.root), str(self.pdf),
+            "--title", "Manual title", "--author", "Ada Lovelace", "--author", "Grace Hopper",
+            "--year", "2026", "--journal", "Journal of Testing", "--doi", "10.1234/example",
+            "--citation-key", "lovelace2026",
+        ])
+        self.assertEqual(single_pdf.title, "Manual title")
+        self.assertEqual(single_pdf.author, ["Ada Lovelace", "Grace Hopper"])
+        self.assertEqual(single_pdf.journal, "Journal of Testing")
+
+        option_values = {
+            "--title": "Manual title",
+            "--author": "Ada Lovelace",
+            "--year": "2026",
+            "--journal": "Journal of Testing",
+            "--doi": "10.1234/example",
+            "--citation-key": "lovelace2026",
+        }
+        for option, value in option_values.items():
+            with self.subTest(option=option), self.assertRaises(SystemExit):
+                parser.parse_args([
+                    "add-directory", "--database", str(self.corpus.root), str(self.root), option, value,
+                ])
+
     def test_physical_block_merge_diagnostics_require_debug(self):
         page = {"document_id": "paper", "page_number": 1, "words": [{"text": "placeholder"}]}
         physical_blocks = OrderedDict([(1, []), (2, [])])
