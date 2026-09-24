@@ -2788,11 +2788,233 @@ def review_payload(metadata: dict) -> dict:
             "metadata_sources": metadata.get("metadata_sources", {}),
             "recurring_margins": metadata.get("recurring_margins", {}),
             "needs_review": metadata.get("needs_review", []),
+            "cleanup": metadata.get("cleanup", {}),
         }
     )
 
 
 # ======================================================================
+# Deterministic candidate cleanup
+# =====================================================================
+
+# The original selection functions remain above as the evidence collectors and
+# scoring baseline.  The overrides below preserve their workflow while ensuring
+# that only cleaned, eligible values reach clustering and selection.
+_ORIGINAL_EXTRACT_DOCUMENT_METADATA = extract_document_metadata
+
+_ACTIVE_CLEANUP_AUDIT: dict | None = None
+
+MONTH_RE = re.compile(
+    r"\b(?:january|february|march|april|may|june|july|august|september|october|november|december)\b",
+    re.IGNORECASE,
+)
+
+AUTHOR_LABEL_RE = re.compile(
+    r"\b(?:pacs(?:\s+numbers?)?|keywords?|key\s+words|cite\s+as|received|accepted|published|"
+    r"correspondence|author\s+information)\b",
+    re.IGNORECASE,
+)
+
+JOURNAL_REJECT_RE = re.compile(
+    r"\b(?:received|accepted|revised|dated|submitted|copyright|all rights reserved)\b",
+    re.IGNORECASE,
+)
+
+
+def _audit_field(name: str) -> dict:
+    assert _ACTIVE_CLEANUP_AUDIT is not None
+    return _ACTIVE_CLEANUP_AUDIT["fields"].setdefault(
+        name,
+        {
+            "raw_candidates": [],
+            "cleaned_candidates": [],
+            "rejected_candidates": [],
+            "selected": None,
+        },
+    )
+
+
+def _candidate_audit_record(candidate: dict, value: str, cleaned_value: str | None = None) -> dict:
+    record = {
+        "value": value,
+        "source": candidate.get("source"),
+        "score": candidate.get("score"),
+    }
+    if cleaned_value is not None:
+        record["cleaned_value"] = cleaned_value
+    if candidate.get("page_index") is not None:
+        record["page_number"] = int(candidate["page_index"]) + 1
+    if candidate.get("pages"):
+        record["pages"] = candidate["pages"]
+    return record
+
+
+def _clean_title(value: str) -> tuple[str | None, str | None]:
+    value = normalize_space(value).replace("\u00ad", "")
+    if not value:
+        return None, "empty"
+    if DOI_RE.search(value) or value.casefold().startswith(("doi", "arxiv")):
+        return None, "identifier_or_link"
+    if re.match(r"^[a-z](?:['=]|\s*=)", value):
+        return None, "formula_or_ocr_noise"
+    letters = len(re.findall(r"[A-Za-zÀ-ÖØ-öø-ÿ]", value))
+    symbols = len(re.findall(r"[^\w\s.,:;!?()'’" + '"' + r"-]", value))
+    if letters < 8 or (symbols > 8 and symbols > letters / 2):
+        return None, "ocr_noise"
+    if re.match(r"^(?:research\s+)?(?:article|letter)\b\s*[:|]", value, re.IGNORECASE):
+        value = re.sub(r"^(?:research\s+)?(?:article|letter)\b\s*[:|]\s*", "", value, flags=re.IGNORECASE)
+    return value, None
+
+
+def _clean_authors(value: str) -> tuple[str | None, str | None]:
+    value = normalize_space(value)
+    if not value:
+        return None, "empty"
+    if AUTHOR_LABEL_RE.search(value) or DOI_RE.search(value) or "@" in value:
+        return None, "non_author_label"
+    if AFFILIATION_HINT_RE.search(value):
+        return None, "affiliation"
+    # Superscript affiliation references and correspondence symbols are useful
+    # on the PDF page but not in a compact author display.
+    value = re.sub(r"(?<=[A-Za-zÀ-ÖØ-öø-ÿ])(?:\d+|[*∗†‡§¶])+", "", value)
+    value = re.sub(r",\s*(?:\d+|[*∗†‡§¶])+(?=\s*[,;]|\s|$)", ",", value)
+    value = re.sub(r"\b[ab]\)", "", value, flags=re.IGNORECASE)
+    value = re.sub(r"(?<=[A-Za-zÀ-ÖØ-öø-ÿ])\s+[a-z](?=[,;]|$)", "", value)
+    value = value.replace("∥", " ")
+    value = re.sub(r",\s*(?=and\b|$)", " ", value, flags=re.IGNORECASE)
+    value = re.sub(r",\s*,+", ",", value)
+    value = normalize_space(re.sub(r"\s+([,.;])", r"\1", value)).strip(" ,;")
+    words = re.findall(r"[A-Za-zÀ-ÖØ-öø-ÿ]+", value)
+    if len(words) < 2:
+        return None, "not_person_names"
+    return value, None
+
+
+def _clean_journal(value: str) -> tuple[str | None, str | None]:
+    raw = normalize_space(value)
+    if not raw:
+        return None, "empty"
+    if JOURNAL_REJECT_RE.search(raw) or raw.startswith("("):
+        return None, "receipt_or_copyright_line"
+    value = re.sub(r"https?://\S+|\b\S+\.org/\S*", "", raw, flags=re.IGNORECASE)
+    value = clean_journal_candidate(value)
+    # Publisher document-type labels and URLs are often concatenated directly
+    # to a valid journal masthead.
+    value = re.sub(r"\b(?:research\s+)?(?:article|paper)\b.*$", "", value, flags=re.IGNORECASE)
+    if "/" in value and re.search(r"\bet\s+al\.? ?/?", value, re.IGNORECASE):
+        value = value.rsplit("/", 1)[-1]
+    value = normalize_space(value).strip(" |,;:-–—")
+    if not value or MONTH_RE.fullmatch(value) or re.fullmatch(r"\d{1,2}\s+[A-Za-z]+", value):
+        return None, "date_only"
+    if not re.search(r"[A-Za-z].*[A-Za-z].*[A-Za-z]", value):
+        return None, "not_journal_like"
+    return value, None
+
+
+def _prepare_candidates(field: str, candidates: list[dict]) -> list[dict]:
+    cleaner = {"title": _clean_title, "authors": _clean_authors, "journal": _clean_journal}[field]
+    audit = _audit_field(field)
+    prepared = []
+    for candidate in candidates:
+        raw_value = normalize_space(str(candidate.get("value", "")))
+        audit["raw_candidates"].append(_candidate_audit_record(candidate, raw_value))
+        cleaned_value, reason = cleaner(raw_value)
+        if reason:
+            rejected = _candidate_audit_record(candidate, raw_value)
+            rejected["reason"] = reason
+            audit["rejected_candidates"].append(rejected)
+            continue
+        cleaned = dict(candidate)
+        cleaned["value"] = cleaned_value
+        cleaned["raw_value"] = raw_value
+        prepared.append(cleaned)
+        audit["cleaned_candidates"].append(_candidate_audit_record(candidate, raw_value, cleaned_value))
+    return prepared
+
+
+def _record_selection(field: str, result: dict) -> dict:
+    _audit_field(field)["selected"] = {
+        "value": result.get("value"),
+        "confidence": result.get("confidence"),
+        "sources": result.get("sources", []),
+    }
+    return result
+
+
+def select_title(document: dict, xmp: dict, first_page_lines: list[PageLine], known_dois: list[str]) -> dict:
+    candidates = []
+    embedded = document.get("metadata", {}).get("title")
+    if plausible_pdf_title(embedded, document.get("filename", "")) and not looks_like_internal_title(embedded, known_dois):
+        candidates.append({"value": normalize_space(embedded), "score": 6.0, "source": "pdf_metadata"})
+    for value in xmp["title"]:
+        if plausible_pdf_title(value, document.get("filename", "")) and not looks_like_internal_title(value, known_dois):
+            candidates.append({"value": value, "score": 7.0, "source": "xmp"})
+    visible = build_visible_title_candidates(first_page_lines)
+    candidates.extend(visible[:3])
+    clusters = rescore_title_clusters(cluster_text_candidates(_prepare_candidates("title", candidates), 0.78))
+    title_bbox = visible[0]["bbox"] if visible else None
+    if not clusters:
+        return _record_selection("title", {"value": None, "confidence": "none", "sources": [], "candidates": [], "title_bbox": title_bbox})
+    best = clusters[0]
+    families = set(best.get("source_families", []))
+    confidence = "high" if {"embedded", "visual"} <= families else "medium" if best["score"] >= 7.0 else "none"
+    return _record_selection("title", {"value": best["value"] if confidence != "none" else None, "confidence": confidence, "sources": best["sources"], "source_families": best.get("source_families", []), "candidates": clusters[:5], "title_bbox": title_bbox})
+
+
+def select_authors(document: dict, xmp: dict, first_page_lines: list[PageLine], title_result: dict) -> dict:
+    candidates = []
+    embedded = document.get("metadata", {}).get("author")
+    if plausible_pdf_author(embedded):
+        candidates.append({"value": normalize_space(embedded), "score": 5.0, "source": "pdf_metadata"})
+    if xmp["authors"]:
+        candidates.append({"value": normalize_space(", ".join(xmp["authors"])), "score": 8.0, "source": "xmp"})
+    visible = find_visible_authors(first_page_lines, title_result.get("title_bbox"))
+    if visible:
+        candidates.append({"value": visible, "score": 5.0, "source": "page_layout"})
+    candidates = _prepare_candidates("authors", candidates)
+    if not candidates:
+        return _record_selection("authors", {"value": None, "confidence": "none", "sources": [], "candidates": []})
+    candidates.sort(key=lambda item: item["score"], reverse=True)
+    best = candidates[0]
+    agreeing_sources = {best["source"]}
+    for candidate in candidates[1:]:
+        if author_token_overlap(best["value"], candidate["value"]) >= 0.40:
+            agreeing_sources.add(candidate["source"])
+    confidence = "high" if best["source"] == "xmp" or len(agreeing_sources) >= 2 else "medium"
+    return _record_selection("authors", {"value": best["value"], "confidence": confidence, "sources": sorted(agreeing_sources), "candidates": candidates})
+
+
+def select_journal(candidates: list[dict]) -> dict:
+    clusters = cluster_text_candidates(_prepare_candidates("journal", candidates), 0.72)
+    if not clusters:
+        return _record_selection("journal", {"value": None, "confidence": "none", "sources": [], "candidates": []})
+    best = clusters[0]
+    sources = set(best["sources"])
+    recurring_page_count = max((member.get("page_count", 0) for member in best["members"]), default=0)
+    confidence = "high" if ("xmp" in sources and len(sources) >= 2) or recurring_page_count >= 3 else "medium" if "xmp" in sources or best["score"] >= 6 else "none"
+    return _record_selection("journal", {"value": best["value"] if confidence != "none" else None, "confidence": confidence, "sources": best["sources"], "candidates": clusters[:5]})
+
+
+def extract_document_metadata(document: dict, pages: list[dict], pdf_path: Path) -> dict:
+    global _ACTIVE_CLEANUP_AUDIT
+    _ACTIVE_CLEANUP_AUDIT = {"version": 1, "fields": {}}
+    try:
+        result = _ORIGINAL_EXTRACT_DOCUMENT_METADATA(document, pages, pdf_path)
+        doi = result["fields"]["doi"]
+        doi_audit = _audit_field("doi")
+        doi_audit["raw_candidates"] = [
+            {"value": candidate["value"], "sources": candidate.get("sources", []), "score": candidate.get("score")}
+            for candidate in doi["candidates"]
+        ]
+        doi_audit["cleaned_candidates"] = list(doi_audit["raw_candidates"])
+        doi_audit["selected"] = {"value": doi["value"], "confidence": doi["confidence"], "sources": doi["sources"]}
+        result["schema_version"] = SCHEMA_VERSION
+        result["cleanup"] = _ACTIVE_CLEANUP_AUDIT
+        return result
+    finally:
+        _ACTIVE_CLEANUP_AUDIT = None
+
+
 # Main
 # ======================================================================
 

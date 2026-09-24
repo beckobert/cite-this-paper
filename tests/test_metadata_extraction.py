@@ -7,6 +7,7 @@ from unittest.mock import patch
 import pymupdf
 
 from cite_this_paper.ingest import ingest_pdf
+from cite_this_paper.processing import metadata as metadata_processing
 from cite_this_paper.processing.metadata import extract_document_metadata, extract_identifiers
 from cite_this_paper.processing.pdf_extraction import extract_pdf
 
@@ -49,6 +50,17 @@ class MetadataExtractionTests(CorpusTestCase):
         self.assertIn("second_page", metadata["fields"]["doi"]["sources"])
         self.assertIn("recurring_footer", metadata["fields"]["doi"]["sources"])
         self.assertIn("recurring_margin", metadata["fields"]["journal"]["sources"])
+        self.assertEqual(set(metadata["cleanup"]["fields"]), {"title", "authors", "journal", "doi"})
+
+    def test_journal_cleanup_preserves_letter_in_a_journal_name(self):
+        self.assertEqual(
+            metadata_processing._clean_journal("Journal of Experimental Letter"),
+            ("Journal of Experimental Letter", None),
+        )
+        self.assertEqual(
+            metadata_processing._clean_journal("Journal of Testing Article"),
+            ("Journal of Testing", None),
+        )
 
     def test_ingestion_stores_candidates_but_not_page_layout_blocks_and_manual_values_win(self):
         result = ingest_pdf(self.corpus, self.pdf, on_duplicate="discard", metadata_overrides={"title": "Manual title"})

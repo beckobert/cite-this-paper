@@ -6,7 +6,7 @@ import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 
 SCHEMA = """
