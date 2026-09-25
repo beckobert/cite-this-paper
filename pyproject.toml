@@ -19,6 +19,14 @@ dependencies = [
     "platformdirs>=4.0",
 ]
 
+[project.optional-dependencies]
+e5 = [
+    "sentence-transformers>=3.0",
+]
+openai = [
+    "openai>=1.0",
+]
+
 [project.scripts]
 cite-this-paper = "cite_this_paper.cli:main"
 

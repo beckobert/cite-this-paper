@@ -11,6 +11,11 @@ from pathlib import Path
 
 from .cleanup import CleanupResult, cleanup_corpora, find_inactive_corpora
 from .corpus import Corpus, CorpusError, DuplicateDocumentError
+from .embeddings import (
+    EmbeddingSpec,
+    PROVIDER_DEFAULTS,
+    validate_embedding_spec,
+)
 from .indexing import rebuild_index
 from .ingest import IngestResult, ingest_pdf
 from .progress import ConsoleReporter, ProgressReporter
@@ -25,7 +30,7 @@ RESPONSIBILITY_NOTICE = (
 )
 
 OPERATIONAL_COMMANDS = frozenset(
-    {"add-pdf", "add-directory", "rebuild-index", "verify-claim", "show-sentences"}
+    {"add-pdf", "add-directory", "configure-embedding", "rebuild-index", "verify-claim", "show-sentences"}
 )
 
 
@@ -103,6 +108,49 @@ def _add_metadata_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--journal")
     parser.add_argument("--doi")
     parser.add_argument("--citation-key")
+
+
+def _add_embedding_configuration_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--provider", required=True, choices=tuple(PROVIDER_DEFAULTS))
+    parser.add_argument("--model", help="Provider model identifier; uses the provider default when omitted.")
+    parser.add_argument("--revision", help="Optional immutable model revision.")
+    parser.add_argument("--device", help="Local backend device, for example cpu or cuda:0.")
+    parser.add_argument("--batch-size", type=int)
+    parser.add_argument("--max-length", type=int)
+    parser.add_argument("--dimensions", type=int, help="Requested OpenAI embedding dimension.")
+    parser.add_argument("--adapter", help="Corpus-local adapter reference in PATH:CLASS form.")
+    parser.add_argument(
+        "--option",
+        action="append",
+        default=[],
+        metavar="KEY=JSON",
+        help="Additional provider option; JSON values preserve booleans, numbers, lists, and objects.",
+    )
+
+
+def _embedding_spec_from_args(args: argparse.Namespace) -> EmbeddingSpec:
+    options: dict[str, object] = {}
+    for key in ("device", "batch_size", "max_length", "dimensions"):
+        value = getattr(args, key)
+        if value is not None:
+            options[key] = value
+    for item in args.option:
+        try:
+            key, raw_value = item.split("=", 1)
+            if not key:
+                raise ValueError
+            options[key] = json.loads(raw_value)
+        except (ValueError, json.JSONDecodeError) as error:
+            raise CorpusError(f"Invalid embedding option {item!r}; use KEY=JSON.") from error
+    spec = EmbeddingSpec(
+        args.provider,
+        args.model or PROVIDER_DEFAULTS[args.provider],
+        args.revision,
+        options,
+        args.adapter,
+    )
+    validate_embedding_spec(spec)
+    return spec
 
 
 def _ingest_one(
@@ -433,6 +481,14 @@ def build_parser(*, session: bool = False) -> argparse.ArgumentParser:
         if name == "add-pdf":
             _add_metadata_arguments(add)
 
+    configure_embedding = commands.add_parser(
+        "configure-embedding",
+        help="Select the embedding backend used by this corpus.",
+    )
+    if database_required:
+        configure_embedding.add_argument("--database", required=True, type=Path)
+    _add_embedding_configuration_arguments(configure_embedding)
+
     rebuild = commands.add_parser("rebuild-index", help="Rebuild dense and lexical indexes.")
     if database_required:
         rebuild.add_argument("--database", required=True, type=Path)
@@ -495,6 +551,15 @@ def execute_operational(
         index_status = _maybe_rebuild(corpus, args, any(result.status == "added" for result in results), reporter)
         _print_ingestion_report(corpus, results, index_status)
         return 1 if any(result.status == "failed" for result in results) else 0
+    if args.command == "configure-embedding":
+        spec = _embedding_spec_from_args(args)
+        requires_rebuild = corpus.configure_embedding(spec)
+        print(f"Configured embedding backend: {spec.label}")
+        if requires_rebuild:
+            print("The active vector index uses a different embedding setup. Run rebuild-index before verifying claims.")
+        else:
+            print("The configured embedding setup matches the active index, or the corpus has no index yet.")
+        return 0
     if args.command == "rebuild-index":
         result = rebuild_index(corpus, reporter=reporter)
         print(f"Rebuilt {result.indexed_passages} passages ({result.dimensions} dimensions).")

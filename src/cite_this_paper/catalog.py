@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import sqlite3
@@ -12,6 +13,7 @@ import numpy as np
 
 from .cleanup import corpus_size
 from .corpus import Corpus, CorpusError
+from .embeddings import embedding_spec_from_config
 from .schema import SCHEMA_VERSION
 
 
@@ -37,6 +39,7 @@ class CorpusSummary:
     verification_run_count: int | None = None
     ingestion_error_count: int | None = None
     embedding_model: str | None = None
+    configured_embedding_model: str | None = None
     indexed_passage_count: int | None = None
     embedding_dimensions: int | None = None
     last_indexed_at: str | None = None
@@ -107,6 +110,14 @@ def _matrix_dimensions(path: Path) -> int | None:
         return None
 
 
+def _configured_embedding_label(path: Path) -> str | None:
+    try:
+        config = json.loads((path / "corpus-config.json").read_text(encoding="utf-8"))
+        return embedding_spec_from_config(config).label
+    except (OSError, json.JSONDecodeError, CorpusError):
+        return None
+
+
 def inspect_corpus(root: Path, name: str) -> CorpusSummary:
     """Read a corpus summary without requiring schema compatibility."""
     path = corpus_path(root, name)
@@ -158,6 +169,7 @@ def inspect_corpus(root: Path, name: str) -> CorpusSummary:
                 verification_run_count=_count(connection, "verification_runs"),
                 ingestion_error_count=_count(connection, "ingestion_errors"),
                 embedding_model=state["embedding_model"],
+                configured_embedding_model=_configured_embedding_label(path),
                 indexed_passage_count=int(state["indexed_passage_count"]),
                 embedding_dimensions=_matrix_dimensions(path / "vectors" / "embeddings.npy"),
                 last_indexed_at=state["last_indexed_at"],

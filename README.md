@@ -25,7 +25,7 @@ A corpus directory contains:
   data, and verification audit records;
 - `pdfs/` — managed copies of the ingested source PDFs;
 - `vectors/embeddings.npy` — the current dense retrieval index;
-- `corpus-config.json` — model names and passage-building settings;
+- `corpus-config.json` — embedding selection, model settings, and passage-building settings;
 - `review/` — generated source-page images when evidence is rendered.
 
 Internally, the package has five stages:
@@ -34,8 +34,7 @@ Internally, the package has five stages:
    sentences and retrieval passages.
 2. Passage classification excludes terminal material such as references from
    retrieval.
-3. Index rebuilding creates dense BGE-M3 embeddings and a SQLite FTS lexical
-   index.
+3. Index rebuilding creates dense embeddings and a SQLite FTS5 lexical index.
 4. Claim verification combines dense and lexical retrieval, Qwen reranking,
    and locally executed Qwen passage verification.
 5. Source review renders the selected evidence sentences directly on their PDF
@@ -54,6 +53,7 @@ cite-this-paper shell
 
 cite-this-paper [no corpus] ❯ create water
 cite-this-paper [water] ❯ add-directory /path/to/papers --defer-rebuild
+cite-this-paper [water] ❯ configure-embedding --provider e5 --device cpu
 cite-this-paper [water] ❯ rebuild-index
 cite-this-paper [water] ❯ verify-claim "Your scientific claim"
 ```
@@ -152,6 +152,47 @@ The default reranker and verifier use CUDA. Use `--device cpu` when the chosen
 models support CPU execution. Candidate counts can be tuned with
 `--candidate-k`, `--rerank-k`, and `--verify-k`; the standard retrieval,
 reranking, and verification stages remain mandatory.
+
+### Embedding backends
+
+SQLite FTS5 remains the fixed, local lexical-search implementation. Dense
+embeddings can be selected per corpus with `configure-embedding`; changing an
+embedding backend, model, revision, vector-affecting option, or local adapter
+requires `rebuild-index` before claims can be verified.
+
+The default `bge-m3` backend runs `BAAI/bge-m3` locally. The optional local E5
+backend uses the required `passage:` and `query:` prefixes:
+
+```bash
+python -m pip install '.[e5]'
+cite-this-paper configure-embedding --database data/corpora/water --provider e5 --device cpu
+cite-this-paper rebuild-index --database data/corpora/water
+```
+
+The optional OpenAI backend sends passage text during indexing and claim text
+during verification to the Embeddings API. Set `OPENAI_API_KEY` in the
+environment; it is never stored in the corpus. Its default is
+`text-embedding-3-large`, and `--dimensions` can request a smaller vector:
+
+```bash
+python -m pip install '.[openai]'
+cite-this-paper configure-embedding --database data/corpora/water --provider openai --dimensions 1024
+cite-this-paper rebuild-index --database data/corpora/water
+```
+
+Advanced users can keep a custom adapter beside a corpus, outside the package
+source tree. A `local-file` adapter is addressed relative to the corpus root:
+
+```bash
+cite-this-paper configure-embedding --database data/corpora/water \
+  --provider local-file --model my-model \
+  --adapter providers/my_embeddings.py:MyEmbeddings
+```
+
+The class receives the configured embedding specification and must provide
+`name`, `encode_passages(texts)`, and `encode_queries(texts)` methods; `close()`
+and `fingerprint` are optional. Editing the adapter source invalidates the
+active vector index until it is rebuilt.
 
 ### Corpus cleanup
 

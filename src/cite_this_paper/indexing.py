@@ -13,6 +13,11 @@ from typing import Protocol, Sequence
 import numpy as np
 
 from .corpus import Corpus, CorpusError
+from .embeddings import (
+    create_embedding_backend,
+    descriptor_for_legacy_model,
+    encode_passages,
+)
 from .progress import ProgressReporter, report_stage
 
 
@@ -21,38 +26,6 @@ class EmbeddingModel(Protocol):
 
     def encode(self, texts: Sequence[str]) -> np.ndarray:
         """Return one dense vector per text."""
-
-
-class BGEEmbeddingModel:
-    """Lazy BGE-M3 adapter so database-only commands have no model startup cost."""
-
-    def __init__(self, name: str, batch_size: int = 32, max_length: int = 512):
-        self.name = name
-        self.batch_size = batch_size
-        self.max_length = max_length
-        self._model = None
-
-    def encode(self, texts: Sequence[str]) -> np.ndarray:
-        if self._model is None:
-            from FlagEmbedding import BGEM3FlagModel
-
-            self._model = BGEM3FlagModel(self.name, use_fp16=True)
-        output = self._model.encode(
-            list(texts),
-            batch_size=self.batch_size,
-            max_length=self.max_length,
-            return_dense=True,
-            return_sparse=False,
-            return_colbert_vecs=False,
-        )
-        return normalize_rows(np.asarray(output["dense_vecs"], dtype=np.float32))
-
-    def close(self) -> None:
-        """Release the loaded model and any CUDA memory it held."""
-        had_model = self._model is not None
-        self._model = None
-        if had_model:
-            _collect_model_memory()
 
 
 @dataclass(frozen=True)
@@ -98,9 +71,11 @@ def rebuild_index(
     reporter: ProgressReporter | None = None,
 ) -> IndexResult:
     """Replace the current matrix and FTS contents with the current eligible passages."""
-    config = corpus.config()
     owns_model = model is None
-    model = model or BGEEmbeddingModel(config["embedding_model"])
+    if model is None:
+        model, descriptor = create_embedding_backend(corpus.embedding_spec(), corpus.root)
+    else:
+        descriptor = descriptor_for_legacy_model(model)
     with corpus.connect() as connection:
         rows = connection.execute(
             """
@@ -116,7 +91,7 @@ def rebuild_index(
         if texts:
             report_stage(reporter, f"Loading embedding model: {model.name}")
             report_stage(reporter, f"Creating embeddings for {len(texts)} passage(s)...")
-            matrix = normalize_rows(model.encode(texts))
+            matrix = normalize_rows(encode_passages(model, texts))
             report_stage(reporter, "Passage embeddings created.")
         else:
             report_stage(reporter, "No retrieval-eligible passages found; creating an empty index.")
@@ -147,8 +122,8 @@ def rebuild_index(
                 WHERE id = 1
                 """,
                 (
-                    model.name,
-                    json.dumps({"batch_size": getattr(model, "batch_size", None), "max_length": getattr(model, "max_length", None)}),
+                    getattr(model, "name", type(model).__name__),
+                    json.dumps(descriptor, sort_keys=True),
                     len(rows),
                     datetime.now(UTC).isoformat(timespec="seconds"),
                 ),

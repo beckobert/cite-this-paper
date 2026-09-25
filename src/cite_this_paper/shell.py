@@ -41,6 +41,7 @@ COMMAND_HELP = (
     ("info [NAME]", "Show detailed information for a corpus."),
     ("cleanup NAME …", "Preview or delete named corpora."),
     ("settings", "View or change user-wide shell preferences."),
+    ("configure-embedding", "Select the active corpus embedding backend."),
     ("add-pdf", "Ingest one PDF into the active corpus."),
     ("add-directory", "Ingest PDFs from a directory into the active corpus."),
     ("rebuild-index", "Rebuild the active corpus search indexes."),
@@ -267,6 +268,11 @@ class CorpusShell(cmd.Cmd):
             "Index data: "
             f"{summary.indexed_passage_count} rows, {summary.embedding_dimensions if summary.embedding_dimensions is not None else '-'} dimensions, "
             f"model {summary.embedding_model or '-'}"
+        )
+        self._write(
+            "Embedding: "
+            f"configured {summary.configured_embedding_model or '-'}; "
+            f"active {summary.embedding_model or '-'}"
         )
         self._write(
             "Activity: "

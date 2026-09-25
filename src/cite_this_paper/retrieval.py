@@ -11,7 +11,14 @@ from typing import Any, Sequence
 import numpy as np
 
 from .corpus import Corpus, CorpusError
-from .indexing import BGEEmbeddingModel, EmbeddingModel, close_model, normalize_rows, require_matrix
+from .embeddings import (
+    active_descriptor_matches,
+    assert_active_descriptor,
+    create_embedding_backend,
+    descriptor_for_legacy_model,
+    encode_queries,
+)
+from .indexing import EmbeddingModel, close_model, normalize_rows, require_matrix
 from .models import (
     VERIFIER_PROMPT_VERSION,
     ClaimVerifier,
@@ -73,7 +80,7 @@ def _passage_record(connection, passage_id: int) -> dict[str, Any]:
 
 def dense_search(corpus: Corpus, claim: str, model: EmbeddingModel, candidate_k: int) -> list[Candidate]:
     matrix = require_matrix(corpus)
-    query_matrix = normalize_rows(np.asarray(model.encode([claim]), dtype=np.float32))
+    query_matrix = normalize_rows(encode_queries(model, [claim]))
     if query_matrix.shape[0] != 1 or query_matrix.shape[1] != matrix.shape[1]:
         raise CorpusError("The embedding model is incompatible with the active matrix.")
     scores = matrix @ query_matrix[0]
@@ -239,17 +246,23 @@ def verify_claim(
     """Run the required hybrid retrieval, reranking, and verification sequence."""
     if not claim.strip():
         raise CorpusError("The claim cannot be empty.")
-    config = corpus.config()
     state = corpus.state()
-    warning = None
-    if state["index_status"] == "rebuild_required":
-        warning = "The corpus has newly ingested documents that are pending index rebuild and were not searched."
     if state["index_status"] == "empty":
         raise CorpusError("This corpus has no index yet. Run rebuild-index first.")
     owns_embedding_model = embedding_model is None
     owns_reranker = reranker is None
     owns_verifier = verifier is None
-    embedding_model = embedding_model or BGEEmbeddingModel(config["embedding_model"])
+    if embedding_model is None:
+        embedding_model, descriptor = create_embedding_backend(corpus.embedding_spec(), corpus.root)
+    else:
+        descriptor = descriptor_for_legacy_model(embedding_model)
+    if not active_descriptor_matches(state, descriptor):
+        corpus.mark_rebuild_required()
+        assert_active_descriptor(corpus.root, state, descriptor)
+    warning = None
+    if state["index_status"] == "rebuild_required":
+        warning = "The corpus has newly ingested documents that are pending index rebuild and were not searched."
+    config = corpus.config()
     reranker = reranker or QwenPassageReranker(config["reranker_model"], device=device)
     verifier = verifier or QwenClaimVerifier(config["verifier_model"], device=device)
     run_id = _create_run(

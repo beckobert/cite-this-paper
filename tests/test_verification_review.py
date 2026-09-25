@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from types import SimpleNamespace
@@ -7,6 +8,7 @@ from unittest.mock import patch
 
 from cite_this_paper import cli
 from cite_this_paper.corpus import CorpusError
+from cite_this_paper.embeddings import descriptor_for_spec
 from cite_this_paper.indexing import IndexResult, rebuild_index
 from cite_this_paper.ingest import ingest_pdf
 from cite_this_paper.models import VERDICT_LABELS, VERIFIER_PROMPT, parse_verification_output
@@ -65,8 +67,15 @@ class VerificationAndReviewTests(CorpusTestCase):
         embedding = ClosingEmbeddingModel()
         reranker = ClosingReranker()
         verifier = ClosingVerifier()
+        descriptor = descriptor_for_spec(self.corpus.embedding_spec(), self.corpus.root)
+        with self.corpus.connect() as connection:
+            connection.execute(
+                "UPDATE corpus_state SET embedding_model = ?, embedding_config_json = ? WHERE id = 1",
+                (embedding.name, json.dumps(descriptor)),
+            )
+            connection.commit()
         with (
-            patch("cite_this_paper.retrieval.BGEEmbeddingModel", return_value=embedding),
+            patch("cite_this_paper.retrieval.create_embedding_backend", return_value=(embedding, descriptor)),
             patch("cite_this_paper.retrieval.QwenPassageReranker", return_value=reranker),
             patch("cite_this_paper.retrieval.QwenClaimVerifier", return_value=verifier),
         ):

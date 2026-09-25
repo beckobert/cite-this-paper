@@ -147,6 +147,17 @@ class ShellAndCliTests(CorpusTestCase):
         self.assertTrue(arguments[0].quiet)
         self.assertTrue(keyword_arguments["interactive"])
 
+    def test_shell_configures_the_active_corpus_embedding_backend(self):
+        catalog_root = self.root / "catalog"
+        corpus = Corpus.create(catalog_root / "water")
+        shell = CorpusShell(catalog_root, stdout=StringIO(), settings_path=self.root / "settings.json")
+        shell.onecmd("load water")
+        shell.onecmd("configure-embedding --provider e5 --device cpu")
+
+        spec = corpus.embedding_spec()
+        self.assertEqual((spec.provider, spec.model), ("e5", "intfloat/e5-large-v2"))
+        self.assertEqual(spec.options, {"batch_size": 32, "device": "cpu"})
+
     def test_shell_completion_covers_commands_corpora_options_and_settings(self):
         catalog_root = self.root / "catalog"
         Corpus.create(catalog_root / "water")
